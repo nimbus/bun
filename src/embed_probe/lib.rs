@@ -26,6 +26,8 @@ static ASYNC_HOST_CALL_PAYLOAD: AtomicI32 = AtomicI32::new(0);
 static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
 
+const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
+
 unsafe extern "C" {
     safe fn JSC__VM__getAPILock(vm: &VM);
     safe fn JSC__VM__releaseAPILock(vm: &VM);
@@ -261,88 +263,104 @@ fn run_program_bundle_host_call_probe(vm: &mut VirtualMachine) -> i32 {
             ),
         );
 
-        let bundle_source = br#"
-globalThis.__nimbusBundleSyncObserved = -1;
-globalThis.__nimbusBundleAsyncObserved = -1;
-globalThis.__nimbusBundle = {
-  sync(value) {
-    return globalThis.__nimbusHostCall(value);
-  },
-  async asyncCall(value) {
-    return await globalThis.__nimbusAsyncHostCall(value);
-  },
+        let context_source = br#"
+globalThis.__nimbusGeneratedProgramState = {
+  dbObserved: -1,
+  scheduleDelay: -1,
+  scheduleName: "",
+  scheduleVisibility: "",
+  scheduleKind: "",
+  scheduleBody: "",
+  scheduleHostResult: -1,
 };
+globalThis.__nimbusCreateContext = () => ({
+  db: {
+    insert: async (_table, document) => {
+      const observed = await globalThis.__nimbusAsyncHostCall(
+        document && document.body === "hello" ? 41 : -1,
+      );
+      globalThis.__nimbusGeneratedProgramState.dbObserved = observed;
+      return document && document.body === "hello" ? "message-id" : "scheduled-id";
+    },
+  },
+  scheduler: {
+    runAfter: async (delayMs, mutationRef, args) => {
+      const state = globalThis.__nimbusGeneratedProgramState;
+      state.scheduleDelay = delayMs;
+      state.scheduleName = mutationRef.name;
+      state.scheduleVisibility = mutationRef.visibility;
+      state.scheduleKind = mutationRef.kind;
+      state.scheduleBody = args.body;
+      state.scheduleHostResult = globalThis.__nimbusHostCall(41);
+      return "job-id";
+    },
+  },
+});
 1
 "#;
-        let loaded = match evaluate_program(
+        let context_loaded = match evaluate_program(
             global,
-            bundle_source,
-            b"nimbus-bun-embed-probe-program-bundle.js",
+            context_source,
+            b"nimbus-bun-embed-probe-generated-program-context.js",
             21,
         ) {
             Ok(result) => result,
             Err(status) => return status,
         };
-        if !loaded.is_number() || loaded.as_number() as i32 != 1 {
+        if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
             return 22;
         }
 
-        let sync_result = match evaluate_program(
+        if let Err(status) = evaluate_program(
             global,
-            b"globalThis.__nimbusBundleSyncObserved = globalThis.__nimbusBundle.sync(41)",
-            b"nimbus-bun-embed-probe-program-bundle-sync.js",
+            GENERATED_NIMBUS_PROGRAM_BUNDLE,
+            b"nimbus-bun-embed-probe-generated-program-bundle.js",
             23,
         ) {
-            Ok(result) => result,
-            Err(status) => return status,
-        };
-        if !sync_result.is_number() || sync_result.as_number() as i32 != 42 {
-            return 24;
+            return status;
         }
 
         let async_result = match evaluate_program(
             global,
             br#"
-globalThis.__nimbusBundleAsyncPromise = globalThis.__nimbusBundle.asyncCall(41).then((value) => {
-  globalThis.__nimbusBundleAsyncObserved = value;
-  return value;
+globalThis.__nimbusGeneratedProgramPromise = globalThis.__nimbusInvoke({
+  kind: "mutation",
+  function_name: "messages:sendAndSchedule",
+  args: { body: "hello" },
+}).then((response) => {
+  globalThis.__nimbusGeneratedProgramResponse = response;
+  return response.status === "ok" && response.value === "message-id" ? 42 : -1;
 });
-globalThis.__nimbusBundleAsyncPromise
+globalThis.__nimbusGeneratedProgramPromise
 "#,
-            b"nimbus-bun-embed-probe-program-bundle-async.js",
-            25,
+            b"nimbus-bun-embed-probe-generated-program-invoke.js",
+            24,
         ) {
             Ok(result) => result,
             Err(status) => return status,
         };
         match async_result.as_promise() {
             Some(promise) => promise,
-            None => return 26,
+            None => return 25,
         }
     };
 
-    if HOST_CALL_COUNT.load(Ordering::SeqCst) != 1 {
-        return 27;
-    }
-    if HOST_CALL_PAYLOAD.load(Ordering::SeqCst) != 41 {
-        return 28;
-    }
-    if HOST_CALL_RETURNED.load(Ordering::SeqCst) != 42 {
-        return 29;
-    }
     if ASYNC_HOST_CALL_COUNT.load(Ordering::SeqCst) != 1 {
-        return 30;
+        return 26;
     }
     if ASYNC_HOST_CALL_PAYLOAD.load(Ordering::SeqCst) != 41 {
-        return 31;
+        return 28;
     }
     if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 0 {
-        return 32;
+        return 29;
+    }
+    if HOST_CALL_COUNT.load(Ordering::SeqCst) != 0 {
+        return 30;
     }
 
     let host_promise = ASYNC_PROMISE.load(Ordering::SeqCst);
     if host_promise.is_null() {
-        return 33;
+        return 31;
     }
 
     {
@@ -350,49 +368,61 @@ globalThis.__nimbusBundleAsyncPromise
         vm.wait_for_promise(AnyPromise::Normal(async_invocation_promise));
 
         if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 1 {
-            return 34;
+            return 32;
         }
         if ASYNC_TASK_RETURNED.load(Ordering::SeqCst) != 42 {
+            return 33;
+        }
+        if HOST_CALL_COUNT.load(Ordering::SeqCst) != 1 {
+            return 34;
+        }
+        if HOST_CALL_PAYLOAD.load(Ordering::SeqCst) != 41 {
             return 35;
+        }
+        if HOST_CALL_RETURNED.load(Ordering::SeqCst) != 42 {
+            return 36;
         }
 
         let host_promise = JSPromise::opaque_mut(host_promise);
         if host_promise.status() != PromiseStatus::Fulfilled {
-            return 36;
+            return 37;
         }
         let invocation_promise = JSPromise::opaque_mut(async_invocation_promise);
         if invocation_promise.status() != PromiseStatus::Fulfilled {
-            return 37;
+            return 38;
         }
         let invocation_result = invocation_promise.result(vm.jsc_vm());
         if !invocation_result.is_number() || invocation_result.as_number() as i32 != 42 {
-            return 38;
+            return 39;
         }
 
-        let sync_observed = match evaluate_program(
+        let state_check = match evaluate_program(
             global,
-            b"globalThis.__nimbusBundleSyncObserved",
-            b"nimbus-bun-embed-probe-program-bundle-sync-observed.js",
-            39,
+            br#"
+(() => {
+  const state = globalThis.__nimbusGeneratedProgramState;
+  const response = globalThis.__nimbusGeneratedProgramResponse;
+  return state.dbObserved === 42
+    && state.scheduleDelay === 1000
+    && state.scheduleName === "messages:sendInternal"
+    && state.scheduleVisibility === "internal"
+    && state.scheduleKind === "mutation"
+    && state.scheduleBody === "hello later"
+    && state.scheduleHostResult === 42
+    && response.status === "ok"
+    && response.value === "message-id"
+      ? 42
+      : -1;
+})()
+"#,
+            b"nimbus-bun-embed-probe-generated-program-state.js",
+            40,
         ) {
             Ok(result) => result,
             Err(status) => return status,
         };
-        if !sync_observed.is_number() || sync_observed.as_number() as i32 != 42 {
-            return 40;
-        }
-
-        let async_observed = match evaluate_program(
-            global,
-            b"globalThis.__nimbusBundleAsyncObserved",
-            b"nimbus-bun-embed-probe-program-bundle-async-observed.js",
-            41,
-        ) {
-            Ok(result) => result,
-            Err(status) => return status,
-        };
-        if !async_observed.is_number() || async_observed.as_number() as i32 != 42 {
-            return 42;
+        if !state_check.is_number() || state_check.as_number() as i32 != 42 {
+            return 41;
         }
     }
 
