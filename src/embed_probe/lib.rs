@@ -55,6 +55,11 @@ pub extern "C" fn nimbus_bun_embed_probe_async_host_call() -> i32 {
     construct_vm_and_run(run_async_host_call_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_program_bundle_host_calls() -> i32 {
+    construct_vm_and_run(run_program_bundle_host_call_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     bun_runtime::allocators::register_safety_vtables();
@@ -211,6 +216,183 @@ globalThis.__nimbusAsyncHostCall(41).then((value) => {
         };
         if !observed.is_number() || observed.as_number() as i32 != 42 {
             return 20;
+        }
+    }
+
+    0
+}
+
+fn run_program_bundle_host_call_probe(vm: &mut VirtualMachine) -> i32 {
+    HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    HOST_CALL_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RUN_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_PROMISE.store(core::ptr::null_mut(), Ordering::SeqCst);
+
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    let async_invocation_promise = {
+        let _lock = vm.jsc_vm().get_api_lock();
+
+        global.to_js_value().put(
+            global,
+            b"__nimbusHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusHostCall",
+                __jsc_host_nimbus_bun_embed_sync_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+        global.to_js_value().put(
+            global,
+            b"__nimbusAsyncHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusAsyncHostCall",
+                __jsc_host_nimbus_bun_embed_async_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+
+        let bundle_source = br#"
+globalThis.__nimbusBundleSyncObserved = -1;
+globalThis.__nimbusBundleAsyncObserved = -1;
+globalThis.__nimbusBundle = {
+  sync(value) {
+    return globalThis.__nimbusHostCall(value);
+  },
+  async asyncCall(value) {
+    return await globalThis.__nimbusAsyncHostCall(value);
+  },
+};
+1
+"#;
+        let loaded = match evaluate_program(
+            global,
+            bundle_source,
+            b"nimbus-bun-embed-probe-program-bundle.js",
+            21,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !loaded.is_number() || loaded.as_number() as i32 != 1 {
+            return 22;
+        }
+
+        let sync_result = match evaluate_program(
+            global,
+            b"globalThis.__nimbusBundleSyncObserved = globalThis.__nimbusBundle.sync(41)",
+            b"nimbus-bun-embed-probe-program-bundle-sync.js",
+            23,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !sync_result.is_number() || sync_result.as_number() as i32 != 42 {
+            return 24;
+        }
+
+        let async_result = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusBundleAsyncPromise = globalThis.__nimbusBundle.asyncCall(41).then((value) => {
+  globalThis.__nimbusBundleAsyncObserved = value;
+  return value;
+});
+globalThis.__nimbusBundleAsyncPromise
+"#,
+            b"nimbus-bun-embed-probe-program-bundle-async.js",
+            25,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        match async_result.as_promise() {
+            Some(promise) => promise,
+            None => return 26,
+        }
+    };
+
+    if HOST_CALL_COUNT.load(Ordering::SeqCst) != 1 {
+        return 27;
+    }
+    if HOST_CALL_PAYLOAD.load(Ordering::SeqCst) != 41 {
+        return 28;
+    }
+    if HOST_CALL_RETURNED.load(Ordering::SeqCst) != 42 {
+        return 29;
+    }
+    if ASYNC_HOST_CALL_COUNT.load(Ordering::SeqCst) != 1 {
+        return 30;
+    }
+    if ASYNC_HOST_CALL_PAYLOAD.load(Ordering::SeqCst) != 41 {
+        return 31;
+    }
+    if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 0 {
+        return 32;
+    }
+
+    let host_promise = ASYNC_PROMISE.load(Ordering::SeqCst);
+    if host_promise.is_null() {
+        return 33;
+    }
+
+    {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        vm.wait_for_promise(AnyPromise::Normal(async_invocation_promise));
+
+        if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 1 {
+            return 34;
+        }
+        if ASYNC_TASK_RETURNED.load(Ordering::SeqCst) != 42 {
+            return 35;
+        }
+
+        let host_promise = JSPromise::opaque_mut(host_promise);
+        if host_promise.status() != PromiseStatus::Fulfilled {
+            return 36;
+        }
+        let invocation_promise = JSPromise::opaque_mut(async_invocation_promise);
+        if invocation_promise.status() != PromiseStatus::Fulfilled {
+            return 37;
+        }
+        let invocation_result = invocation_promise.result(vm.jsc_vm());
+        if !invocation_result.is_number() || invocation_result.as_number() as i32 != 42 {
+            return 38;
+        }
+
+        let sync_observed = match evaluate_program(
+            global,
+            b"globalThis.__nimbusBundleSyncObserved",
+            b"nimbus-bun-embed-probe-program-bundle-sync-observed.js",
+            39,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !sync_observed.is_number() || sync_observed.as_number() as i32 != 42 {
+            return 40;
+        }
+
+        let async_observed = match evaluate_program(
+            global,
+            b"globalThis.__nimbusBundleAsyncObserved",
+            b"nimbus-bun-embed-probe-program-bundle-async-observed.js",
+            41,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !async_observed.is_number() || async_observed.as_number() as i32 != 42 {
+            return 42;
         }
     }
 
