@@ -168,8 +168,9 @@ function emitGeneratorRule(n: Ninja, cfg: Config, input: ConfigureInput): void {
   writeIfChanged(configFile, JSON.stringify(input, null, 2) + "\n");
 
   const hostWin = cfg.host.os === "windows";
+  const chdir = hostWin ? `cd /d ${quote(cfg.cwd, true)} && ` : `cd ${quote(cfg.cwd, false)} && `;
   n.rule("regen", {
-    command: `${cfg.jsRuntime} ${quote(buildScript, hostWin)} --config-file=$in`,
+    command: `${chdir}${cfg.jsRuntime} ${quote(buildScript, hostWin)} --config-file=${quote(configFile, hostWin)}`,
     description: "reconfigure",
     // generator = 1: exempt from `ninja -t clean`, triggers manifest restart
     // when the output (build.ninja) is rebuilt.

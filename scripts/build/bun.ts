@@ -701,9 +701,12 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
     driver,
     [
       'extern "C" int nimbus_bun_embed_probe_construct_and_destroy_vm();',
+      'extern "C" int nimbus_bun_embed_probe_sync_host_call();',
       "",
       "int main() {",
-      "  return nimbus_bun_embed_probe_construct_and_destroy_vm();",
+      "  int status = nimbus_bun_embed_probe_construct_and_destroy_vm();",
+      "  if (status != 0) return status;",
+      "  return nimbus_bun_embed_probe_sync_host_call();",
       "}",
       "",
     ].join("\n"),
