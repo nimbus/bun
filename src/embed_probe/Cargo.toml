@@ -1,0 +1,18 @@
+[package]
+name = "bun_embed_probe"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "bun_embed_probe"
+path = "lib.rs"
+crate-type = ["staticlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bun_core.workspace = true
+bun_jsc.workspace = true
+bun_link_bridge.workspace = true
+bun_runtime.workspace = true

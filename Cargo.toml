@@ -93,6 +93,8 @@ members = [
   "src/options_types",
   "src/output",
   "src/runtime",
+  "src/link_bridge",
+  "src/embed_probe",
   "src/simdutf_sys",
   "src/which",
   "src/transpiler",
@@ -444,6 +446,8 @@ bun_options_types = { path = "src/options_types" }
 bun_bunfig = { path = "src/bunfig" }
 bun_output = { path = "src/output" }
 bun_runtime = { path = "src/runtime", default-features = false }
+bun_link_bridge = { path = "src/link_bridge" }
+bun_embed_probe = { path = "src/embed_probe" }
 bun_simdutf_sys = { path = "src/simdutf_sys" }
 bun_which = { path = "src/which" }
 bun_transpiler = { path = "src/transpiler" }

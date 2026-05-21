@@ -2,7 +2,7 @@
  * Rust build step — cargo as a ninja edge.
  *
  * The Rust port lives in the workspace rooted at the repo's `Cargo.toml`;
- * the leaf crate is `src/bun_bin` (`crate-type = ["staticlib"]`). One
+ * the default leaf crate is `src/bun_bin` (`crate-type = ["staticlib"]`). One
  * `cargo build -p bun_bin` produces `libbun_rust.a` containing the entire
  * Rust crate graph plus libstd, with `main` exported `#[no_mangle] extern "C"`.
  *
@@ -176,8 +176,12 @@ function rustTargetDir(cfg: Config): string {
  * `<target-dir>/<triple>/<profile>/<libPrefix>bun_rust<libSuffix>`.
  */
 export function rustLibPath(cfg: Config): string {
+  return rustArchivePath(cfg, "bun_rust");
+}
+
+export function rustArchivePath(cfg: Config, libName: string): string {
   const { subdir } = cargoProfile(cfg);
-  return resolve(rustTargetDir(cfg), rustTarget(cfg), subdir, `${cfg.libPrefix}bun_rust${cfg.libSuffix}`);
+  return resolve(rustTargetDir(cfg), rustTarget(cfg), subdir, `${cfg.libPrefix}${libName}${cfg.libSuffix}`);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -211,7 +215,7 @@ export function registerRustRules(n: Ninja, cfg: Config): void {
   // the staticlib when nothing changed.
   n.rule("rust_build", {
     command: `${stream} --console --cwd=$cwd $env ${q(cfg.cargo)} build $args`,
-    description: "cargo bun_bin → $label",
+    description: "cargo $package → $label",
     pool: "console",
     restat: true,
   });
@@ -302,7 +306,7 @@ export function registerRustRules(n: Ninja, cfg: Config): void {
       `${stream} --console --cwd=$cwd $env ${q(cfg.cargo)} build $args`;
     n.rule("rust_build_cross", {
       command: hostWin ? `cmd /c "${chain}"` : chain,
-      description: "cargo bun_bin → $label ($rust_target_arg)",
+      description: "cargo $package → $label ($rust_target_arg)",
       pool: "console",
       restat: true,
     });
@@ -345,12 +349,28 @@ export interface RustBuildInputs {
   vendorStamps: string[];
 }
 
+export interface RustArchiveSpec {
+  packageName: string;
+  libName: string;
+  phonyName: string;
+  includeWindowsShim?: boolean;
+}
+
 /**
  * Emit the cargo build step. Returns the output staticlib path as a
  * one-element array so the link step can spread it alongside the C++
  * object list.
  */
 export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string[] {
+  return emitRustArchive(n, cfg, inputs, {
+    packageName: "bun_bin",
+    libName: "bun_rust",
+    phonyName: "bun-rust",
+    includeWindowsShim: true,
+  });
+}
+
+export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, spec: RustArchiveSpec): string[] {
   assert(cfg.cargo !== undefined, "building bun's Rust crates requires cargo but no rust toolchain was found", {
     hint: "Install rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
   });
@@ -363,12 +383,12 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
   const triple = rustTarget(cfg);
   const tier3 = rustTargetIsTier3(triple);
   const profile = cargoProfile(cfg);
-  const lib = rustLibPath(cfg);
+  const lib = rustArchivePath(cfg, spec.libName);
 
   // ─── Build args ───
   const args: string[] = [
     "-p",
-    "bun_bin",
+    spec.packageName,
     "--lib",
     "--target-dir",
     targetDir,
@@ -774,7 +794,7 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
   // build (toolchain forwarding, CARGO_HOME) but no codegen dep — the shim
   // crate's graph is bun_core/bun_sys/bun_string only.
   const shimInputs: string[] = [];
-  if (cfg.windows) {
+  if (cfg.windows && spec.includeWindowsShim === true) {
     const shimDest = windowsShimDestPath(cfg);
     // Always `--profile shim` (workspace `[profile.shim]`: panic=abort,
     // opt-level=z, lto, codegen-units=1, strip) regardless of bun's own
@@ -904,13 +924,14 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
       cwd: cfg.cwd,
       args: quoteArgs(args, hostWin),
       ...(useCrossRule ? { rust_target_arg: tier3 ? "" : `--target ${triple}` } : {}),
-      label: `${cfg.libPrefix}bun_rust${cfg.libSuffix}`,
+      package: spec.packageName,
+      label: `${cfg.libPrefix}${spec.libName}${cfg.libSuffix}`,
       env: Object.entries(env)
         .map(([k, v]) => `--env=${k}=${quote(v, hostWin)}`)
         .join(" "),
     },
   });
-  n.phony("bun-rust", [lib]);
+  n.phony(spec.phonyName, [lib]);
   n.blank();
 
   return [lib];

@@ -1,9 +1,10 @@
-//! PHASE-C link bridge — **transient**, not a permanent grab-bag.
+//! Process-neutral C ABI link bridge — **transient**, not a permanent grab-bag.
 //!
 //! Every symbol that used to be stubbed here now has a real home inside
 //! `bun_jsc` / `bun_runtime` /
 //! `bun_http_jsc` / `bun_bundler_jsc`. As of this revision `bun_runtime` (and
-//! transitively `bun_jsc`) is a real dependency of this binary crate, so any
+//! transitively `bun_jsc`) is a real dependency of the staticlib roots that
+//! use this bridge, so any
 //! `#[no_mangle]` definition that compiles in either of those crates is now
 //! visible to the linker — the corresponding stub has been deleted.
 //!
@@ -27,6 +28,11 @@
 )]
 
 use core::ffi::c_void;
+
+// Force-link `bun_platform` so its `#[no_mangle]` C exports
+// (`sys_epoll_pwait2`, `ioctl_ficlone`, ...) reach the linker for every Rust
+// staticlib root that owns this bridge.
+use bun_platform as _;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Opaque handles — pointer-sized, never dereferenced here.

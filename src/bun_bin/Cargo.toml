@@ -29,7 +29,7 @@ bun_core.workspace = true
 bun_sys.workspace = true
 bun_crash_handler.workspace = true
 bun_mimalloc_sys.workspace = true
-bun_platform.workspace = true
+bun_link_bridge.workspace = true
 
 # Phase-C: bun_runtime now compiles green; pulled in for `Cli::start()`.
 # bun_jsc remains gated until the JSC bridge links.
