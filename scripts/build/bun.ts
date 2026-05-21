@@ -22,8 +22,8 @@
  * build in parallel on separate machines then meet for linking.
  */
 
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, relative, resolve, sep } from "node:path";
 import type { Sources } from "../glob-sources.ts";
 import { emitCodegen, type CodegenOutputs } from "./codegen.ts";
 import { ar, cc, cxx, link, pch } from "./compile.ts";
@@ -35,7 +35,7 @@ import { assert } from "./error.ts";
 import { bunIncludes, computeFlags, extraFlagsFor, linkDepends } from "./flags.ts";
 import { writeIfChanged } from "./fs.ts";
 import type { Ninja } from "./ninja.ts";
-import { emitRust, linkerMapPath, rustLibPath } from "./rust.ts";
+import { emitRust, emitRustArchive, linkerMapPath, rustLibPath } from "./rust.ts";
 import { quote, slash } from "./shell.ts";
 import { emitShims } from "./shims.ts";
 import { computeDepLibs, resolveDep, type ResolvedDep } from "./source.ts";
@@ -451,6 +451,22 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   n.comment("─── Link ───");
   n.blank();
 
+  const embedProbeRustObjects = emitRustArchive(
+    n,
+    cfg,
+    {
+      codegenInputs: codegen.rustInputs,
+      codegenOrderOnly: codegen.rustOrderOnly,
+      rustSources: sources.rust,
+      vendorStamps: depsByName.get("lolhtml")?.outputs ?? [],
+    },
+    {
+      packageName: "bun_embed_probe",
+      libName: "bun_embed_probe",
+      phonyName: "bun-embed-probe-rust",
+    },
+  );
+
   // Windows resources (.rc → .res): icon, VersionInfo. Compiled at link
   // time (not archived in cpp-only) — .res is small and the .rc depends
   // on cfg.version which the link step already has. Matches cmake's
@@ -467,6 +483,17 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   // is needed; if a member ever isn't, `rustLinkFlags()` in rust.ts is the
   // wrapping helper.
   const shims = emitShims(n, cfg);
+  emitEmbedProbeTarget(n, cfg, {
+    allObjects,
+    rustObjects: embedProbeRustObjects,
+    windowsRes,
+    depLibs,
+    cxxFlags: cxxFlagsFull,
+    depHeaderSignal,
+    codegenOrderOnly,
+    ldflags: [...flags.ldflags, ...systemLibs(cfg), ...manifestLinkFlags(cfg), ...shims.ldflags],
+    implicitInputs: [...linkImplicitInputs(cfg), ...shims.implicitInputs],
+  });
   const linkObjects = [...allObjects, ...rustObjects, ...windowsRes];
   const ldflags = [...flags.ldflags, ...systemLibs(cfg), ...manifestLinkFlags(cfg), ...shims.ldflags];
   const exe = link(n, cfg, exeName, linkObjects, {
@@ -640,6 +667,83 @@ function emitLinkOnly(n: Ninja, cfg: Config): BunOutput {
     rustObjects,
     objects: [],
   };
+}
+
+interface EmbedProbeTargetInput {
+  allObjects: string[];
+  rustObjects: string[];
+  windowsRes: string[];
+  depLibs: string[];
+  cxxFlags: string[];
+  depHeaderSignal: string[];
+  codegenOrderOnly: string[];
+  ldflags: string[];
+  implicitInputs: string[];
+}
+
+function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInput): void {
+  const driver = resolve(cfg.buildDir, "embed-probe", "driver.cpp");
+  mkdirSync(dirname(driver), { recursive: true });
+  writeIfChanged(
+    driver,
+    [
+      'extern "C" int nimbus_bun_embed_probe_construct_and_destroy_vm();',
+      "",
+      "int main() {",
+      "  return nimbus_bun_embed_probe_construct_and_destroy_vm();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const driverObject = cxx(n, cfg, driver, {
+    flags: input.cxxFlags,
+    implicitInputs: input.depHeaderSignal,
+    orderOnlyInputs: input.codegenOrderOnly,
+  });
+
+  const exe = link(
+    n,
+    cfg,
+    "bun-embed-probe",
+    [driverObject, ...input.allObjects, ...input.rustObjects, ...input.windowsRes],
+    {
+      libs: input.depLibs,
+      flags: input.ldflags,
+      implicitInputs: input.implicitInputs,
+    },
+  );
+
+  emitEmbedProbeSmokeTest(n, cfg, exe);
+}
+
+function emitEmbedProbeSmokeTest(n: Ninja, cfg: Config, exe: string): void {
+  if (cfg.crossTarget !== undefined) {
+    n.phony("check-bun-embed-probe", [exe]);
+    return;
+  }
+
+  const stamp = resolve(cfg.buildDir, "bun-embed-probe.smoke-test-passed");
+  const envWrap = "env BUN_DEBUG_QUIET_LOGS=1";
+  const testCmd = cfg.windows ? exe : `${envWrap} ${exe}`;
+  const q = (p: string) => quote(p, cfg.windows);
+  const wrap = `${cfg.jsRuntime} ${q(streamPath)} check --console`;
+
+  n.rule("embed_probe_smoke_test", {
+    command: cfg.windows
+      ? `${wrap} cmd /c "${testCmd} && type nul > $out"`
+      : `${wrap} sh -c '( ${testCmd} ) && touch $out'`,
+    description: "bun-embed-probe",
+    pool: "console",
+  });
+
+  n.build({
+    outputs: [stamp],
+    rule: "embed_probe_smoke_test",
+    inputs: [exe],
+  });
+
+  n.phony("check-bun-embed-probe", [stamp]);
 }
 
 /**

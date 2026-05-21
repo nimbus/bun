@@ -267,8 +267,8 @@ dependencies = [
  "bun_core",
  "bun_crash_handler",
  "bun_io",
+ "bun_link_bridge",
  "bun_mimalloc_sys",
- "bun_platform",
  "bun_runtime",
  "bun_sys",
  "libc",
@@ -740,6 +740,16 @@ dependencies = [
  "phf 0.11.3",
  "scopeguard",
  "strum",
+]
+
+[[package]]
+name = "bun_embed_probe"
+version = "0.0.0"
+dependencies = [
+ "bun_core",
+ "bun_jsc",
+ "bun_link_bridge",
+ "bun_runtime",
 ]
 
 [[package]]
@@ -1356,6 +1366,14 @@ dependencies = [
  "phf 0.11.3",
  "scopeguard",
  "strum",
+]
+
+[[package]]
+name = "bun_link_bridge"
+version = "0.0.0"
+dependencies = [
+ "bun_core",
+ "bun_platform",
 ]
 
 [[package]]
