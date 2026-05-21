@@ -1,0 +1,15 @@
+[package]
+name = "bun_link_bridge"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+bstr.workspace = true
+bun_core.workspace = true
+bun_platform.workspace = true

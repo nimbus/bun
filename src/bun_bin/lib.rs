@@ -35,11 +35,9 @@
 
 use core::ffi::{c_char, c_int};
 
-mod c_abi_exports;
-
-// Force-link `bun_platform` so its `#[no_mangle]` C exports
-// (`sys_epoll_pwait2`, …) reach the linker.
-use bun_platform as _;
+// Force-link the process-neutral C ABI bridge for symbols the native object
+// graph still expects outside the process-owned CLI entrypoint.
+use bun_link_bridge as _;
 
 use bun_core::Global;
 use bun_core::StackCheck;

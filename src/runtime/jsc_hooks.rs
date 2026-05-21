@@ -158,6 +158,14 @@ pub(crate) fn runtime_state() -> *mut RuntimeState {
     RUNTIME_STATE.with(Cell::get)
 }
 
+/// Touch the high-tier runtime hook state so a non-CLI staticlib root (the
+/// Nimbus embed probe) owns `__BUN_RUNTIME_HOOKS` without depending on Bun's
+/// process-owned CLI root. Deliberately returns nothing: out-of-crate callers
+/// get linkage, not access to `RuntimeState`.
+pub fn embedder_touch_runtime_state() {
+    let _ = runtime_state();
+}
+
 /// Recover this thread's `timer::All` heap as a raw pointer.
 ///
 /// Note: `bun_jsc::VirtualMachine.timer` is a `()` placeholder;
