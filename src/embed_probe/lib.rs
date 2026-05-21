@@ -5,7 +5,8 @@
 //! process exit. The native build graph links this archive with Bun's normal
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
 
-use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use std::{sync::Arc, thread, time::Duration};
 
 use bun_jsc::virtual_machine::{InitOptions, VirtualMachine};
 use bun_jsc::{
@@ -25,6 +26,7 @@ static ASYNC_TASK_RUN_COUNT: AtomicI32 = AtomicI32::new(0);
 static ASYNC_HOST_CALL_PAYLOAD: AtomicI32 = AtomicI32::new(0);
 static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
+static SAFETY_VTABLES_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
 
@@ -62,9 +64,16 @@ pub extern "C" fn nimbus_bun_embed_probe_program_bundle_host_calls() -> i32 {
     construct_vm_and_run(run_program_bundle_host_call_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_timeout_and_cancel() -> i32 {
+    construct_vm_and_run(run_timeout_and_cancel_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
-    bun_runtime::allocators::register_safety_vtables();
+    if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
+        bun_runtime::allocators::register_safety_vtables();
+    }
     bun_jsc::initialize(false);
 
     // Touch the high-tier runtime hooks so this staticlib root owns
@@ -429,6 +438,194 @@ globalThis.__nimbusGeneratedProgramPromise
     0
 }
 
+fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    {
+        let _lock = vm.jsc_vm().get_api_lock();
+        // Cross-thread `notify_need_termination` expects JSC's termination
+        // exception to have been materialized by the owning thread first.
+        global.request_termination();
+        global.clear_termination_exception();
+
+        let context_loaded = match evaluate_program(
+            global,
+            b"globalThis.__nimbusCreateContext = () => ({}); 1",
+            b"nimbus-bun-embed-probe-timeout-context.js",
+            62,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
+            return 63;
+        }
+
+        if let Err(status) = evaluate_program(
+            global,
+            GENERATED_NIMBUS_PROGRAM_BUNDLE,
+            b"nimbus-bun-embed-probe-timeout-program-bundle.js",
+            42,
+        ) {
+            return status;
+        }
+    }
+
+    if let Err(status) = evaluate_generated_spin_with_deadline_timeout(vm, global) {
+        return status;
+    }
+    if let Err(status) = evaluate_recovery_script(vm, global, 50, 51) {
+        return status;
+    }
+
+    if let Err(status) = evaluate_generated_spin_with_external_cancel(vm, global) {
+        return status;
+    }
+    if let Err(status) = evaluate_recovery_script(vm, global, 60, 61) {
+        return status;
+    }
+
+    0
+}
+
+fn evaluate_generated_spin_with_deadline_timeout(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+) -> Result<(), i32> {
+    let completed = Arc::new(AtomicBool::new(false));
+    let deadline_fired = Arc::new(AtomicBool::new(false));
+    let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
+    let completed_for_thread = Arc::clone(&completed);
+    let deadline_for_thread = Arc::clone(&deadline_fired);
+    let deadline = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+        if !completed_for_thread.load(Ordering::SeqCst) {
+            deadline_for_thread.store(true, Ordering::SeqCst);
+            // SAFETY: the proof joins this thread before the VM can be torn down.
+            let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
+            jsc_vm.notify_need_termination();
+        }
+    });
+
+    let spin_evaluation = {
+        let _lock = vm.jsc_vm().get_api_lock();
+        evaluate_generated_spin(
+            vm.jsc_vm(),
+            global,
+            b"nimbus-bun-embed-probe-timeout-spin.js",
+            43,
+            44,
+        )
+    };
+    let result = spin_evaluation.and_then(|evaluation| {
+        if let SpinEvaluation::Promise(promise) = evaluation {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            vm.wait_for_promise(AnyPromise::Normal(promise));
+            if !vm.jsc_vm().has_termination_request() && !global.has_exception() {
+                return Err(45);
+            }
+        }
+        Ok(())
+    });
+    completed.store(true, Ordering::SeqCst);
+    if deadline.join().is_err() {
+        return Err(46);
+    }
+    global.clear_termination_exception();
+
+    result?;
+    if !deadline_fired.load(Ordering::SeqCst) {
+        return Err(47);
+    }
+    if vm.jsc_vm().has_execution_time_limit() {
+        return Err(48);
+    }
+    if vm.jsc_vm().has_termination_request() {
+        return Err(49);
+    }
+    Ok(())
+}
+
+fn evaluate_generated_spin_with_external_cancel(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+) -> Result<(), i32> {
+    let completed = Arc::new(AtomicBool::new(false));
+    let cancel_fired = Arc::new(AtomicBool::new(false));
+    let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
+    let completed_for_thread = Arc::clone(&completed);
+    let cancel_for_thread = Arc::clone(&cancel_fired);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+        if !completed_for_thread.load(Ordering::SeqCst) {
+            cancel_for_thread.store(true, Ordering::SeqCst);
+            // SAFETY: the proof joins this thread before the VM can be torn down.
+            let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
+            jsc_vm.notify_need_termination();
+        }
+    });
+
+    let spin_evaluation = {
+        let _lock = vm.jsc_vm().get_api_lock();
+        evaluate_generated_spin(
+            vm.jsc_vm(),
+            global,
+            b"nimbus-bun-embed-probe-external-cancel-spin.js",
+            52,
+            53,
+        )
+    };
+    let result = spin_evaluation.and_then(|evaluation| {
+        if let SpinEvaluation::Promise(promise) = evaluation {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            vm.wait_for_promise(AnyPromise::Normal(promise));
+            if !vm.jsc_vm().has_termination_request() && !global.has_exception() {
+                return Err(54);
+            }
+        }
+        Ok(())
+    });
+    completed.store(true, Ordering::SeqCst);
+    if canceller.join().is_err() {
+        return Err(55);
+    }
+    global.clear_termination_exception();
+
+    result?;
+    if !cancel_fired.load(Ordering::SeqCst) {
+        return Err(56);
+    }
+    if vm.jsc_vm().has_termination_request() {
+        return Err(57);
+    }
+    if vm.jsc_vm().has_execution_time_limit() {
+        return Err(58);
+    }
+    Ok(())
+}
+
+fn evaluate_recovery_script(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+    exception_status: i32,
+    mismatch_status: i32,
+) -> Result<(), i32> {
+    let recovered = {
+        let _lock = vm.jsc_vm().get_api_lock();
+        evaluate_program(
+            global,
+            b"40 + 2",
+            b"nimbus-bun-embed-probe-timeout-recovery.js",
+            exception_status,
+        )?
+    };
+    if !recovered.is_number() || recovered.as_number() as i32 != 42 {
+        return Err(mismatch_status);
+    }
+    Ok(())
+}
+
 fn evaluate_program(
     global: &JSGlobalObject,
     source: &[u8],
@@ -455,6 +652,112 @@ fn evaluate_program(
     }
 
     Ok(result)
+}
+
+const GENERATED_SPIN_INVOCATION_SOURCE: &[u8] = br#"
+globalThis.__nimbusSpinEntered = false;
+globalThis.__nimbusInvoke({
+  kind: "mutation",
+  function_name: "messages:spinForever",
+  args: {
+    body: {
+      trim() {
+        globalThis.__nimbusSpinEntered = true;
+        return "hello";
+      },
+    },
+  },
+})
+"#;
+
+enum SpinEvaluation {
+    Promise(*mut JSPromise),
+    Terminated,
+}
+
+fn evaluate_generated_spin(
+    jsc_vm: &VM,
+    global: &JSGlobalObject,
+    filename: &[u8],
+    exception_status: i32,
+    promise_status: i32,
+) -> Result<SpinEvaluation, i32> {
+    let mut exception = JSValue::ZERO;
+    // SAFETY: `global` is the live VM global; source and filename byte slices
+    // are valid for the duration of this synchronous program evaluation; and
+    // `exception` is a unique writable out-parameter.
+    let value = unsafe {
+        Bun__REPL__evaluate(
+            core::ptr::from_ref(global),
+            GENERATED_SPIN_INVOCATION_SOURCE.as_ptr(),
+            GENERATED_SPIN_INVOCATION_SOURCE.len(),
+            filename.as_ptr(),
+            filename.len(),
+            &mut exception,
+        )
+    };
+
+    if !exception.is_empty() {
+        if is_termination_signal(jsc_vm, exception)
+            || jsc_vm.has_termination_request()
+            || !global.clear_exception_except_termination()
+        {
+            return Ok(SpinEvaluation::Terminated);
+        }
+        global.clear_exception();
+        if generated_spin_loop_was_entered(global) {
+            return Ok(SpinEvaluation::Terminated);
+        }
+        return Err(exception_status);
+    }
+    if global.has_exception() {
+        if jsc_vm.has_termination_request() || !global.clear_exception_except_termination() {
+            return Ok(SpinEvaluation::Terminated);
+        }
+        global.clear_exception();
+        if generated_spin_loop_was_entered(global) {
+            return Ok(SpinEvaluation::Terminated);
+        }
+        return Err(exception_status);
+    }
+
+    match value.as_promise() {
+        Some(promise) => Ok(SpinEvaluation::Promise(promise)),
+        None => Err(promise_status),
+    }
+}
+
+fn generated_spin_loop_was_entered(global: &JSGlobalObject) -> bool {
+    let mut exception = JSValue::ZERO;
+    // SAFETY: `global` is the live VM global; source and filename byte slices
+    // are valid for this synchronous read; and `exception` is a unique
+    // writable out-parameter.
+    let value = unsafe {
+        Bun__REPL__evaluate(
+            core::ptr::from_ref(global),
+            b"globalThis.__nimbusSpinEntered === true ? 1 : 0".as_ptr(),
+            b"globalThis.__nimbusSpinEntered === true ? 1 : 0".len(),
+            b"nimbus-bun-embed-probe-spin-entered.js".as_ptr(),
+            b"nimbus-bun-embed-probe-spin-entered.js".len(),
+            &mut exception,
+        )
+    };
+    exception.is_empty()
+        && !global.has_exception()
+        && value.is_number()
+        && value.as_number() as i32 == 1
+}
+
+fn is_termination_signal(jsc_vm: &VM, exception: JSValue) -> bool {
+    if exception.is_termination_exception() {
+        return true;
+    }
+    let Some(exception) = exception.as_exception(core::ptr::from_ref(jsc_vm).cast_mut()) else {
+        return false;
+    };
+    // SAFETY: `as_exception` proved the JS value is backed by a live JSC
+    // Exception cell for this VM.
+    jsc_vm.is_termination_exception(unsafe { &*exception })
 }
 
 struct ProbeApiLock {
