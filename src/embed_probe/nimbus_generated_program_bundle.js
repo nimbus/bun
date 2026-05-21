@@ -49,6 +49,30 @@ const manifest = {
           "reference_kind": "mutation"
         }
       }
+    },
+    {
+      "name": "messages:spinForever",
+      "export": "spinForever",
+      "module": "messages",
+      "kind": "mutation",
+      "visibility": "public",
+      "schedulable": true,
+      "runtime_environment": "default",
+      "runtime_engine": "v8",
+      "runtime_bundle_content_kind": "javascript",
+      "runtime_compatibility_target": "web_standard_isolate",
+      "runtime_package_resolution": "bundled",
+      "node_version": null,
+      "node_runtime_target": null,
+      "plan": null,
+      "runtime_handler": "async (_ctx, { body }) => {\n    body.trim();\n    while (true) {}\n  }",
+      "runtime_bindings": {
+        "internalScheduledFunctions": {
+          "type": "generated_reference_tree",
+          "visibility": "internal",
+          "reference_kind": "mutation"
+        }
+      }
     }
   ],
   "routes": []
