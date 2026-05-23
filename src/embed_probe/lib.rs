@@ -84,6 +84,17 @@ pub extern "C" fn nimbus_bun_embed_probe_package_module_policy() -> i32 {
     construct_vm_and_run(run_package_module_policy_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_lifecycle_reuse_stress() -> i32 {
+    for _ in 0..LIFECYCLE_FRESH_VM_ITERATIONS {
+        let status = construct_vm_and_run(run_program_bundle_host_call_probe);
+        if status != 0 {
+            return status;
+        }
+    }
+    construct_vm_and_run(run_lifecycle_reuse_stress_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -1289,6 +1300,248 @@ fn module_policy_status_name(status: i32) -> &'static str {
         7 => "unsafe_import_fulfilled",
         _ => "unknown",
     }
+}
+
+const LIFECYCLE_FRESH_VM_ITERATIONS: usize = 4;
+const LIFECYCLE_RETAINED_INVOCATIONS: i32 = 8;
+const LIFECYCLE_CANCEL_ITERATIONS: usize = 3;
+
+fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
+    HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    HOST_CALL_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RUN_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_PROMISE.store(core::ptr::null_mut(), Ordering::SeqCst);
+
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        global.request_termination();
+        global.clear_termination_exception();
+
+        global.to_js_value().put(
+            global,
+            b"__nimbusHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusHostCall",
+                __jsc_host_nimbus_bun_embed_sync_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+        global.to_js_value().put(
+            global,
+            b"__nimbusAsyncHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusAsyncHostCall",
+                __jsc_host_nimbus_bun_embed_async_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+
+        let context_loaded = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusLifecycleProbeState = {
+  dbObserved: -1,
+  insertCount: 0,
+  scheduleCount: 0,
+  scheduleHostResult: -1,
+  lastBody: "",
+};
+globalThis.__nimbusCreateContext = () => ({
+  db: {
+    insert: async (_table, document) => {
+      const observed = await globalThis.__nimbusAsyncHostCall(41);
+      const state = globalThis.__nimbusLifecycleProbeState;
+      state.dbObserved = observed;
+      state.insertCount += 1;
+      state.lastBody = document && document.body || "";
+      return `message-id-${state.insertCount}`;
+    },
+  },
+  scheduler: {
+    runAfter: async () => {
+      const state = globalThis.__nimbusLifecycleProbeState;
+      state.scheduleCount += 1;
+      state.scheduleHostResult = globalThis.__nimbusHostCall(41);
+      return `job-id-${state.scheduleCount}`;
+    },
+  },
+});
+1
+"#,
+            b"nimbus-bun-embed-probe-lifecycle-context.js",
+            230,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
+            return 231;
+        }
+
+        if let Err(status) = evaluate_program(
+            global,
+            GENERATED_NIMBUS_PROGRAM_BUNDLE,
+            b"nimbus-bun-embed-probe-lifecycle-generated-program-bundle.js",
+            232,
+        ) {
+            return status;
+        }
+    }
+
+    for iteration in 0..LIFECYCLE_RETAINED_INVOCATIONS {
+        if let Err(status) = invoke_lifecycle_generated_mutation(
+            vm,
+            global,
+            &format!("reuse-{iteration}"),
+            iteration + 1,
+            233,
+        ) {
+            return status;
+        }
+    }
+
+    if ASYNC_HOST_CALL_COUNT.load(Ordering::SeqCst) != LIFECYCLE_RETAINED_INVOCATIONS {
+        return 236;
+    }
+    if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != LIFECYCLE_RETAINED_INVOCATIONS {
+        return 237;
+    }
+    if HOST_CALL_COUNT.load(Ordering::SeqCst) != LIFECYCLE_RETAINED_INVOCATIONS {
+        return 238;
+    }
+
+    for _ in 0..LIFECYCLE_CANCEL_ITERATIONS {
+        if let Err(status) = evaluate_generated_spin_with_external_cancel(vm, global) {
+            return status;
+        }
+        if let Err(status) = evaluate_recovery_script(vm, global, 239, 240) {
+            return status;
+        }
+    }
+
+    if let Err(status) = invoke_lifecycle_generated_mutation(
+        vm,
+        global,
+        "post-cancel",
+        LIFECYCLE_RETAINED_INVOCATIONS + 1,
+        241,
+    ) {
+        return status;
+    }
+
+    let expected_total = LIFECYCLE_RETAINED_INVOCATIONS + 1;
+    if ASYNC_HOST_CALL_COUNT.load(Ordering::SeqCst) != expected_total {
+        return 244;
+    }
+    if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != expected_total {
+        return 245;
+    }
+    if HOST_CALL_COUNT.load(Ordering::SeqCst) != expected_total {
+        return 246;
+    }
+
+    let state_check_source = format!(
+        r#"
+(() => {{
+  const state = globalThis.__nimbusLifecycleProbeState;
+  return state.insertCount === {expected_total}
+    && state.scheduleCount === {expected_total}
+    && state.dbObserved === 42
+    && state.scheduleHostResult === 42
+    && state.lastBody === "post-cancel"
+      ? 42
+      : -1;
+}})()
+"#
+    );
+    let state_check = {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        match evaluate_program(
+            global,
+            state_check_source.as_bytes(),
+            b"nimbus-bun-embed-probe-lifecycle-state.js",
+            242,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        }
+    };
+    if !state_check.is_number() || state_check.as_number() as i32 != 42 {
+        return 243;
+    }
+
+    eprintln!("nimbus bun embed lifecycle reuse stress:");
+    eprintln!(
+        "  fresh_vm_create_invoke_destroy_iterations: {}",
+        LIFECYCLE_FRESH_VM_ITERATIONS
+    );
+    eprintln!("  retained_vm_invocations_before_cancel: {LIFECYCLE_RETAINED_INVOCATIONS}");
+    eprintln!(
+        "  external_cancel_recovery_iterations: {}",
+        LIFECYCLE_CANCEL_ITERATIONS
+    );
+    eprintln!("  retained_vm_post_cancel_invocation: ok");
+    eprintln!("  retained_vm_reuse: trusted_generated_wrapper_ok");
+    eprintln!("  product_first_policy: fresh_vm_or_discard_until_containment");
+
+    0
+}
+
+fn invoke_lifecycle_generated_mutation(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+    body: &str,
+    expected_message_id: i32,
+    status_base: i32,
+) -> Result<(), i32> {
+    let body = format!("{body:?}");
+    let source = format!(
+        r#"
+globalThis.__nimbusInvoke({{
+  kind: "mutation",
+  function_name: "messages:sendAndSchedule",
+  args: {{ body: {body} }},
+}}).then((response) => {{
+  return response.status === "ok" && response.value === "message-id-{expected_message_id}"
+    ? 42
+    : -1;
+}})
+"#
+    );
+
+    let _lock = ProbeApiLock::new(vm.jsc_vm());
+    let result = evaluate_program(
+        global,
+        source.as_bytes(),
+        b"nimbus-bun-embed-probe-lifecycle-invoke.js",
+        status_base,
+    )?;
+    let Some(promise) = result.as_promise() else {
+        return Err(status_base + 1);
+    };
+    vm.wait_for_promise(AnyPromise::Normal(promise));
+
+    let promise = JSPromise::opaque_mut(promise);
+    if promise.status() != PromiseStatus::Fulfilled {
+        return Err(status_base + 2);
+    }
+    let result = promise.result(vm.jsc_vm());
+    if !result.is_number() || result.as_number() as i32 != 42 {
+        return Err(status_base + 3);
+    }
+
+    Ok(())
 }
 
 fn is_known_permission_classification(classification: i32) -> bool {
