@@ -79,6 +79,11 @@ pub extern "C" fn nimbus_bun_embed_probe_memory_behavior() -> i32 {
     construct_vm_and_run(run_memory_behavior_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_package_module_policy() -> i32 {
+    construct_vm_and_run(run_package_module_policy_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -1020,6 +1025,270 @@ globalThis.__nimbusMemoryProbe = undefined;
     eprintln!("  safe_first_policy: fresh_vm_or_discard_on_pressure");
 
     0
+}
+
+fn run_package_module_policy_probe(vm: &mut VirtualMachine) -> i32 {
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+
+        let context_loaded = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusCreateContext = () => ({});
+1
+"#,
+            b"nimbus-bun-embed-probe-module-context.js",
+            200,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
+            return 201;
+        }
+
+        if let Err(status) = evaluate_program(
+            global,
+            GENERATED_NIMBUS_PROGRAM_BUNDLE,
+            b"nimbus-bun-embed-probe-module-generated-program-bundle.js",
+            202,
+        ) {
+            return status;
+        }
+
+        let wrapper_loaded = match evaluate_program(
+            global,
+            br#"typeof globalThis.__nimbusInvoke === "function" ? 1 : 0"#,
+            b"nimbus-bun-embed-probe-module-wrapper-loaded.js",
+            203,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !wrapper_loaded.is_number() || wrapper_loaded.as_number() as i32 != 1 {
+            return 204;
+        }
+
+        let static_esm_rejected = evaluate_program(
+            global,
+            br#"import { readFile } from "node:fs"; 1"#,
+            b"nimbus-bun-embed-probe-static-esm-program.js",
+            205,
+        )
+        .is_err();
+        if !static_esm_rejected {
+            return 206;
+        }
+    }
+
+    let dynamic_import_status = match evaluate_dynamic_import_node_fs(vm, global) {
+        Ok(status) => status,
+        Err(status) => return status,
+    };
+
+    let (
+        require_status,
+        bun_resolve_status,
+        bun_resolve_sync_status,
+        generated_node_builtin_status,
+        generated_external_package_status,
+    ) = {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        let require_status = match evaluate_number(
+            global,
+            br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+            b"nimbus-bun-embed-probe-require-status.js",
+            212,
+            213,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
+        };
+
+        let bun_resolve_status = match evaluate_number(
+            global,
+            br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.resolve === "undefined" ? 1 : 5)
+"#,
+            b"nimbus-bun-embed-probe-bun-resolve-status.js",
+            214,
+            215,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
+        };
+
+        let bun_resolve_sync_status = match evaluate_number(
+            global,
+            br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.resolveSync === "undefined" ? 1 : 5)
+"#,
+            b"nimbus-bun-embed-probe-bun-resolve-sync-status.js",
+            216,
+            217,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
+        };
+
+        let generated_node_builtin_status = match evaluate_number(
+            global,
+            br#"
+(() => {
+  globalThis.__nimbusNodeBuiltinModules = new Map();
+  try {
+    nodeBuiltinModule("node:fs");
+    return 5;
+  } catch (error) {
+    return String(error && error.message || error).includes("missing generated Node.js builtin binding")
+      ? 2
+      : 4;
+  }
+})()
+"#,
+            b"nimbus-bun-embed-probe-generated-node-builtin-status.js",
+            218,
+            219,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
+        };
+
+        let generated_external_package_status = match evaluate_number(
+            global,
+            br#"
+(() => {
+  globalThis.__nimbusNodeExternalPackages = new Map();
+  try {
+    nodeExternalPackage("left-pad");
+    return 5;
+  } catch (error) {
+    return String(error && error.message || error).includes("missing generated Node.js external package binding")
+      ? 2
+      : 4;
+  }
+})()
+"#,
+            b"nimbus-bun-embed-probe-generated-external-package-status.js",
+            220,
+            221,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
+        };
+
+        (
+            require_status,
+            bun_resolve_status,
+            bun_resolve_sync_status,
+            generated_node_builtin_status,
+            generated_external_package_status,
+        )
+    };
+
+    if require_status != 1 {
+        return 222;
+    }
+    if dynamic_import_status != 6 && dynamic_import_status != 7 {
+        return 223;
+    }
+    if bun_resolve_status != 5 || bun_resolve_sync_status != 5 {
+        return 224;
+    }
+    if generated_node_builtin_status != 2 || generated_external_package_status != 2 {
+        return 225;
+    }
+
+    eprintln!("nimbus bun embed package/module policy:");
+    eprintln!("  artifact_shape: self_contained_program_wrapper");
+    eprintln!("  evaluation_format: program_via_Bun__REPL__evaluate");
+    eprintln!("  static_esm_import_in_program: rejected");
+    eprintln!(
+        "  dynamic_import_node_fs: {}",
+        module_policy_status_name(dynamic_import_status)
+    );
+    eprintln!("  require: {}", module_policy_status_name(require_status));
+    eprintln!(
+        "  Bun.resolve: {}",
+        module_policy_status_name(bun_resolve_status)
+    );
+    eprintln!(
+        "  Bun.resolveSync: {}",
+        module_policy_status_name(bun_resolve_sync_status)
+    );
+    eprintln!(
+        "  generated_node_builtin_empty_map: {}",
+        module_policy_status_name(generated_node_builtin_status)
+    );
+    eprintln!(
+        "  generated_external_package_empty_map: {}",
+        module_policy_status_name(generated_external_package_status)
+    );
+    eprintln!("  selected_next_lane: program_wrapper");
+    eprintln!("  required_resolver_api: nimbus_owned_bun_package_resolver");
+
+    0
+}
+
+fn evaluate_dynamic_import_node_fs(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+) -> Result<i32, i32> {
+    let _lock = ProbeApiLock::new(vm.jsc_vm());
+    let result = evaluate_program(
+        global,
+        br#"import("node:fs").then(() => 7, () => 6)"#,
+        b"nimbus-bun-embed-probe-dynamic-import-node-fs.js",
+        207,
+    )?;
+    let Some(promise) = result.as_promise() else {
+        return Err(208);
+    };
+
+    vm.wait_for_promise(AnyPromise::Normal(promise));
+
+    let promise = JSPromise::opaque_mut(promise);
+    if promise.status() != PromiseStatus::Fulfilled {
+        return Err(209);
+    }
+    let result = promise.result(vm.jsc_vm());
+    if !result.is_number() {
+        return Err(210);
+    }
+    Ok(result.as_number() as i32)
+}
+
+fn evaluate_number(
+    global: &JSGlobalObject,
+    source: &[u8],
+    filename: &[u8],
+    exception_status: i32,
+    mismatch_status: i32,
+) -> Result<i32, i32> {
+    let result = evaluate_program(global, source, filename, exception_status)?;
+    if !result.is_number() {
+        return Err(mismatch_status);
+    }
+    Ok(result.as_number() as i32)
+}
+
+fn module_policy_status_name(status: i32) -> &'static str {
+    match status {
+        1 => "absent_by_default",
+        2 => "denied_by_generated_wrapper",
+        4 => "policy_hook_missing",
+        5 => "unsafe_bypass",
+        6 => "rejected_by_bun_loader",
+        7 => "unsafe_import_fulfilled",
+        _ => "unknown",
+    }
 }
 
 fn is_known_permission_classification(classification: i32) -> bool {
