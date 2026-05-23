@@ -69,6 +69,11 @@ pub extern "C" fn nimbus_bun_embed_probe_timeout_and_cancel() -> i32 {
     construct_vm_and_run(run_timeout_and_cancel_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_permission_surface_inventory() -> i32 {
+    construct_vm_and_run(run_permission_surface_inventory_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -487,6 +492,329 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
     }
 
     0
+}
+
+const PERMISSION_ABSENT_BY_DEFAULT: i32 = 1;
+const PERMISSION_DENIED_BY_DEFAULT: i32 = 2;
+const PERMISSION_POLICY_HOOK_AVAILABLE: i32 = 3;
+const PERMISSION_POLICY_HOOK_MISSING: i32 = 4;
+const PERMISSION_UNSAFE_BYPASS: i32 = 5;
+
+struct PermissionSurfaceProbe {
+    name: &'static str,
+    source: &'static [u8],
+}
+
+const PERMISSION_SURFACE_PROBES: &[PermissionSurfaceProbe] = &[
+    PermissionSurfaceProbe {
+        name: "Bun global",
+        source: br#"typeof globalThis.Bun === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.file",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.file === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.write",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.write === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.spawn",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.spawn === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.spawnSync",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.spawnSync === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.serve",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.serve === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.listen",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.listen === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.connect",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.connect === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.plugin",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.plugin === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.FFI",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.FFI === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.dlopen",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.dlopen === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.FFI.dlopen",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.FFI === "undefined"
+    ? 1
+    : (typeof globalThis.Bun.FFI.dlopen === "undefined" ? 1 : 5))
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun.env",
+        source: br#"
+typeof globalThis.Bun === "undefined"
+  ? 1
+  : (typeof globalThis.Bun.env === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "process",
+        source: br#"typeof globalThis.process === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "process.env",
+        source: br#"
+typeof globalThis.process === "undefined"
+  ? 1
+  : (typeof globalThis.process.env === "undefined" ? 1 : 5)
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Node builtin modules via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:fs via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "fs via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:child_process via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:worker_threads via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:net via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:dgram via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "node:ffi via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "native addon via require",
+        source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "fetch",
+        source: br#"typeof globalThis.fetch === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "WebSocket",
+        source: br#"typeof globalThis.WebSocket === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "setTimeout",
+        source: br#"typeof globalThis.setTimeout === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Worker",
+        source: br#"typeof globalThis.Worker === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "new Function",
+        source: br#"typeof globalThis.Function === "function" ? 5 : 1"#,
+    },
+    PermissionSurfaceProbe {
+        name: "eval",
+        source: br#"typeof globalThis.eval === "function" ? 5 : 1"#,
+    },
+    PermissionSurfaceProbe {
+        name: "dynamic import syntax",
+        source: br#"
+(() => {
+  try {
+    new Function("return import('node:fs')");
+    return 4;
+  } catch (_) {
+    return 1;
+  }
+})()
+"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Nimbus host hooks and generated wrapper",
+        source: br#"
+typeof globalThis.__nimbusHostCall === "function"
+  && typeof globalThis.__nimbusAsyncHostCall === "function"
+  && typeof globalThis.__nimbusInvoke === "function"
+    ? 3
+    : 4
+"#,
+    },
+];
+
+fn run_permission_surface_inventory_probe(vm: &mut VirtualMachine) -> i32 {
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    let _lock = vm.jsc_vm().get_api_lock();
+
+    global.to_js_value().put(
+        global,
+        b"__nimbusHostCall",
+        JSFunction::create(
+            global,
+            "__nimbusHostCall",
+            __jsc_host_nimbus_bun_embed_sync_host_call,
+            1,
+            Default::default(),
+        ),
+    );
+    global.to_js_value().put(
+        global,
+        b"__nimbusAsyncHostCall",
+        JSFunction::create(
+            global,
+            "__nimbusAsyncHostCall",
+            __jsc_host_nimbus_bun_embed_async_host_call,
+            1,
+            Default::default(),
+        ),
+    );
+
+    let context_loaded = match evaluate_program(
+        global,
+        br#"
+globalThis.__nimbusCreateContext = () => ({});
+1
+"#,
+        b"nimbus-bun-embed-probe-permission-context.js",
+        100,
+    ) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+    if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
+        return 101;
+    }
+
+    if let Err(status) = evaluate_program(
+        global,
+        GENERATED_NIMBUS_PROGRAM_BUNDLE,
+        b"nimbus-bun-embed-probe-permission-generated-program-bundle.js",
+        102,
+    ) {
+        return status;
+    }
+
+    eprintln!("nimbus bun embed permission surface inventory:");
+    for (index, probe) in PERMISSION_SURFACE_PROBES.iter().enumerate() {
+        let exception_status = 110 + (index as i32 * 2);
+        let mismatch_status = exception_status + 1;
+        let result = match evaluate_program(
+            global,
+            probe.source,
+            b"nimbus-bun-embed-probe-permission-surface.js",
+            exception_status,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !result.is_number() {
+            return mismatch_status;
+        }
+
+        let classification = result.as_number() as i32;
+        if !is_known_permission_classification(classification) {
+            return mismatch_status;
+        }
+
+        eprintln!(
+            "  {}: {}",
+            probe.name,
+            permission_classification_name(classification)
+        );
+    }
+
+    0
+}
+
+fn is_known_permission_classification(classification: i32) -> bool {
+    matches!(
+        classification,
+        PERMISSION_ABSENT_BY_DEFAULT
+            | PERMISSION_DENIED_BY_DEFAULT
+            | PERMISSION_POLICY_HOOK_AVAILABLE
+            | PERMISSION_POLICY_HOOK_MISSING
+            | PERMISSION_UNSAFE_BYPASS
+    )
+}
+
+fn permission_classification_name(classification: i32) -> &'static str {
+    match classification {
+        PERMISSION_ABSENT_BY_DEFAULT => "absent_by_default",
+        PERMISSION_DENIED_BY_DEFAULT => "denied_by_default",
+        PERMISSION_POLICY_HOOK_AVAILABLE => "policy_hook_available",
+        PERMISSION_POLICY_HOOK_MISSING => "policy_hook_missing",
+        PERMISSION_UNSAFE_BYPASS => "unsafe_bypass",
+        _ => "unknown",
+    }
 }
 
 fn evaluate_generated_spin_with_deadline_timeout(
