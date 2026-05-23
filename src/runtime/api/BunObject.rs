@@ -1091,7 +1091,11 @@ fn shrink(global_object: &JSGlobalObject, _: &CallFrame) -> JsResult<JSValue> {
     Ok(JSValue::UNDEFINED)
 }
 
-fn do_resolve(global_this: &JSGlobalObject, arguments: &[JSValue]) -> JsResult<JSValue> {
+fn do_resolve_with_kind(
+    global_this: &JSGlobalObject,
+    arguments: &[JSValue],
+    resolution_kind: jsc::ModuleLoader::EmbedderModuleResolutionKind,
+) -> JsResult<JSValue> {
     // SAFETY: bun_vm() returns the live per-thread singleton.
     let vm = global_this.bun_vm();
     let mut args = ArgumentsSlice::init(vm, arguments);
@@ -1129,7 +1133,13 @@ fn do_resolve(global_this: &JSGlobalObject, arguments: &[JSValue]) -> JsResult<J
     let specifier_str = scopeguard::guard(specifier_str, |s| s.deref());
     let from_str = from.to_bun_string(global_this)?;
     let from_str = scopeguard::guard(from_str, |s| s.deref());
-    do_resolve_with_args::<false>(global_this, *specifier_str, *from_str, mode)
+    do_resolve_with_args::<false>(
+        global_this,
+        *specifier_str,
+        *from_str,
+        mode,
+        resolution_kind,
+    )
 }
 
 /// Single Drop point for the three `BunString`s `do_resolve_with_args` may own.
@@ -1160,6 +1170,7 @@ fn do_resolve_with_args<const IS_FILE_PATH: bool>(
     specifier: BunString,
     from: BunString,
     mode: ResolveMode,
+    resolution_kind: jsc::ModuleLoader::EmbedderModuleResolutionKind,
 ) -> JsResult<JSValue> {
     let mut errorable: ErrorableString = ErrorableString::ok(BunString::empty());
     let mut owned = ResolveDerefOnDrop {
@@ -1177,6 +1188,16 @@ fn do_resolve_with_args<const IS_FILE_PATH: bool>(
     } else {
         specifier
     };
+
+    if jsc::ModuleLoader::embedder_should_deny_module_resolution(
+        ctx,
+        &specifier_for_resolve,
+        resolution_kind,
+    ) {
+        return Err(
+            ctx.throw_invalid_arguments(format_args!("Bun embedder denied module resolution"))
+        );
+    }
 
     VirtualMachine::resolve_maybe_needs_trailing_slash::<IS_FILE_PATH>(
         &mut errorable,
@@ -1210,13 +1231,25 @@ fn do_resolve_with_args<const IS_FILE_PATH: bool>(
 }
 
 #[bun_jsc::host_fn]
-fn resolve_sync(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
-    do_resolve(global_object, callframe.arguments())
+pub(crate) fn resolve_sync(
+    global_object: &JSGlobalObject,
+    callframe: &CallFrame,
+) -> JsResult<JSValue> {
+    do_resolve_with_kind(
+        global_object,
+        callframe.arguments(),
+        jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync,
+    )
 }
 
 #[bun_jsc::host_fn]
-fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
-    let value = match do_resolve(global_object, callframe.arguments()) {
+pub(crate) fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
+    let arguments = callframe.arguments_old::<3>();
+    let value = match do_resolve_with_kind(
+        global_object,
+        arguments.slice(),
+        jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolve,
+    ) {
         Ok(v) => v,
         Err(e) => {
             let err = global_object.take_error(e);
@@ -1230,7 +1263,6 @@ fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JS
     };
     Ok(JSPromise::resolved_promise_value(global_object, value))
 }
-
 // HOST_EXPORT(Bun__resolveSync, c)
 pub fn bun_resolve_sync(
     global: &JSGlobalObject,
@@ -1265,6 +1297,11 @@ pub fn bun_resolve_sync(
             *specifier_str,
             *source_str,
             ResolveMode::from_ffi_bools(is_esm, is_user_require_resolve),
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync
+            },
         )
     })
 }
@@ -1332,6 +1369,11 @@ pub fn bun_resolve_sync_with_paths(
             *specifier_str,
             *source_str,
             ResolveMode::from_ffi_bools(is_esm, is_user_require_resolve),
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync
+            },
         )
     })
 }
@@ -1357,6 +1399,7 @@ pub fn bun_resolve_sync_with_strings(
             *specifier,
             *source,
             ResolveMode::from_ffi_bools(is_esm, false),
+            jsc::ModuleLoader::EmbedderModuleResolutionKind::ImportMetaResolve,
         )
     })
 }
@@ -1388,6 +1431,11 @@ pub fn bun_resolve_sync_with_source(
             *specifier_str,
             *source,
             ResolveMode::from_ffi_bools(is_esm, is_user_require_resolve),
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::ImportMetaResolve
+            },
         )
     })
 }

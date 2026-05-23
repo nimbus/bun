@@ -127,6 +127,21 @@ fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     }
 }
 
+struct EmbedderResolutionDenyGuard;
+
+impl EmbedderResolutionDenyGuard {
+    fn new() -> Self {
+        bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution_for_testing(true);
+        Self
+    }
+}
+
+impl Drop for EmbedderResolutionDenyGuard {
+    fn drop(&mut self) {
+        bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution_for_testing(false);
+    }
+}
+
 fn run_sync_host_call_probe(vm: &mut VirtualMachine) -> i32 {
     HOST_CALL_COUNT.store(0, Ordering::SeqCst);
     HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
@@ -1096,7 +1111,43 @@ globalThis.__nimbusCreateContext = () => ({});
         }
     }
 
+    let _resolution_deny_guard = EmbedderResolutionDenyGuard::new();
+
     let dynamic_import_status = match evaluate_dynamic_import_node_fs(vm, global) {
+        Ok(status) => status,
+        Err(status) => return status,
+    };
+    let dynamic_package_status = match evaluate_dynamic_import_status(
+        vm,
+        global,
+        br#"
+import("left-pad").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
+"#,
+        b"nimbus-bun-embed-probe-dynamic-import-package.js",
+        230,
+        231,
+        232,
+    ) {
+        Ok(status) => status,
+        Err(status) => return status,
+    };
+    let plugin_virtual_module_status = match evaluate_dynamic_import_status(
+        vm,
+        global,
+        br#"
+import("nimbus-plugin:probe").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
+"#,
+        b"nimbus-bun-embed-probe-dynamic-import-plugin-virtual.js",
+        233,
+        234,
+        235,
+    ) {
         Ok(status) => status,
         Err(status) => return status,
     };
@@ -1105,54 +1156,103 @@ globalThis.__nimbusCreateContext = () => ({});
         require_status,
         bun_resolve_status,
         bun_resolve_sync_status,
+        native_addon_resolve_sync_status,
         generated_node_builtin_status,
         generated_external_package_status,
     ) = {
-        let _lock = ProbeApiLock::new(vm.jsc_vm());
-        let require_status = match evaluate_number(
-            global,
-            br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
-            b"nimbus-bun-embed-probe-require-status.js",
-            212,
-            213,
-        ) {
-            Ok(status) => status,
-            Err(status) => return status,
+        let require_status = {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            match evaluate_number(
+                global,
+                br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
+                b"nimbus-bun-embed-probe-require-status.js",
+                212,
+                213,
+            ) {
+                Ok(status) => status,
+                Err(status) => return status,
+            }
         };
 
-        let bun_resolve_status = match evaluate_number(
+        let bun_resolve_status = match evaluate_number_or_promise(
+            vm,
             global,
             br#"
 typeof globalThis.Bun === "undefined"
   ? 1
-  : (typeof globalThis.Bun.resolve === "undefined" ? 1 : 5)
+  : (typeof globalThis.Bun.resolve !== "function"
+      ? 1
+      : globalThis.Bun.resolve("node:fs", "/tmp/nimbus-bun-embed-probe/source.js").then(
+          () => 5,
+          (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 4
+        ))
 "#,
             b"nimbus-bun-embed-probe-bun-resolve-status.js",
             214,
             215,
-        ) {
-            Ok(status) => status,
-            Err(status) => return status,
-        };
-
-        let bun_resolve_sync_status = match evaluate_number(
-            global,
-            br#"
-typeof globalThis.Bun === "undefined"
-  ? 1
-  : (typeof globalThis.Bun.resolveSync === "undefined" ? 1 : 5)
-"#,
-            b"nimbus-bun-embed-probe-bun-resolve-sync-status.js",
             216,
-            217,
         ) {
             Ok(status) => status,
             Err(status) => return status,
         };
 
-        let generated_node_builtin_status = match evaluate_number(
-            global,
-            br#"
+        let bun_resolve_sync_status = {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            match evaluate_number(
+                global,
+                br#"
+(() => {
+  if (typeof globalThis.Bun === "undefined" || typeof globalThis.Bun.resolveSync !== "function") {
+    return 1;
+  }
+  try {
+    globalThis.Bun.resolveSync("node:fs", "/tmp/nimbus-bun-embed-probe/source.js");
+    return 5;
+  } catch (error) {
+    return String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 4;
+  }
+})()
+"#,
+                b"nimbus-bun-embed-probe-bun-resolve-sync-status.js",
+                217,
+                218,
+            ) {
+                Ok(status) => status,
+                Err(status) => return status,
+            }
+        };
+
+        let native_addon_resolve_sync_status = {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            match evaluate_number(
+                global,
+                br#"
+(() => {
+  if (typeof globalThis.Bun === "undefined" || typeof globalThis.Bun.resolveSync !== "function") {
+    return 1;
+  }
+  try {
+    globalThis.Bun.resolveSync("./nimbus-native-addon.node", "/tmp/nimbus-bun-embed-probe/source.js");
+    return 5;
+  } catch (error) {
+    return String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 4;
+  }
+})()
+"#,
+                b"nimbus-bun-embed-probe-native-addon-resolve-sync-status.js",
+                236,
+                237,
+            ) {
+                Ok(status) => status,
+                Err(status) => return status,
+            }
+        };
+
+        let generated_node_builtin_status = {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            match evaluate_number(
+                global,
+                br#"
 (() => {
   globalThis.__nimbusNodeBuiltinModules = new Map();
   try {
@@ -1165,17 +1265,20 @@ typeof globalThis.Bun === "undefined"
   }
 })()
 "#,
-            b"nimbus-bun-embed-probe-generated-node-builtin-status.js",
-            218,
-            219,
-        ) {
-            Ok(status) => status,
-            Err(status) => return status,
+                b"nimbus-bun-embed-probe-generated-node-builtin-status.js",
+                219,
+                220,
+            ) {
+                Ok(status) => status,
+                Err(status) => return status,
+            }
         };
 
-        let generated_external_package_status = match evaluate_number(
-            global,
-            br#"
+        let generated_external_package_status = {
+            let _lock = ProbeApiLock::new(vm.jsc_vm());
+            match evaluate_number(
+                global,
+                br#"
 (() => {
   globalThis.__nimbusNodeExternalPackages = new Map();
   try {
@@ -1188,34 +1291,45 @@ typeof globalThis.Bun === "undefined"
   }
 })()
 "#,
-            b"nimbus-bun-embed-probe-generated-external-package-status.js",
-            220,
-            221,
-        ) {
-            Ok(status) => status,
-            Err(status) => return status,
+                b"nimbus-bun-embed-probe-generated-external-package-status.js",
+                221,
+                222,
+            ) {
+                Ok(status) => status,
+                Err(status) => return status,
+            }
         };
 
         (
             require_status,
             bun_resolve_status,
             bun_resolve_sync_status,
+            native_addon_resolve_sync_status,
             generated_node_builtin_status,
             generated_external_package_status,
         )
     };
 
     if require_status != 1 {
-        return 222;
+        return 240;
     }
-    if dynamic_import_status != 6 && dynamic_import_status != 7 {
-        return 223;
+    if dynamic_import_status != 8 {
+        return 241;
     }
-    if bun_resolve_status != 5 || bun_resolve_sync_status != 5 {
-        return 224;
+    if dynamic_package_status != 8 {
+        return 242;
+    }
+    if plugin_virtual_module_status != 8 {
+        return 243;
+    }
+    if bun_resolve_status != 8 || bun_resolve_sync_status != 8 {
+        return 244;
+    }
+    if native_addon_resolve_sync_status != 8 {
+        return 245;
     }
     if generated_node_builtin_status != 2 || generated_external_package_status != 2 {
-        return 225;
+        return 246;
     }
 
     eprintln!("nimbus bun embed package/module policy:");
@@ -1225,6 +1339,14 @@ typeof globalThis.Bun === "undefined"
     eprintln!(
         "  dynamic_import_node_fs: {}",
         module_policy_status_name(dynamic_import_status)
+    );
+    eprintln!(
+        "  dynamic_import_package_root: {}",
+        module_policy_status_name(dynamic_package_status)
+    );
+    eprintln!(
+        "  plugin_virtual_module_import: {}",
+        module_policy_status_name(plugin_virtual_module_status)
     );
     eprintln!("  require: {}", module_policy_status_name(require_status));
     eprintln!(
@@ -1236,6 +1358,10 @@ typeof globalThis.Bun === "undefined"
         module_policy_status_name(bun_resolve_sync_status)
     );
     eprintln!(
+        "  native_addon_resolveSync: {}",
+        module_policy_status_name(native_addon_resolve_sync_status)
+    );
+    eprintln!(
         "  generated_node_builtin_empty_map: {}",
         module_policy_status_name(generated_node_builtin_status)
     );
@@ -1244,6 +1370,7 @@ typeof globalThis.Bun === "undefined"
         module_policy_status_name(generated_external_package_status)
     );
     eprintln!("  selected_next_lane: program_wrapper");
+    eprintln!("  resolver_policy_hook: native_embedder_deny_all");
     eprintln!("  required_resolver_api: nimbus_owned_bun_package_resolver");
 
     0
@@ -1253,26 +1380,64 @@ fn evaluate_dynamic_import_node_fs(
     vm: &mut VirtualMachine,
     global: &JSGlobalObject,
 ) -> Result<i32, i32> {
-    let _lock = ProbeApiLock::new(vm.jsc_vm());
-    let result = evaluate_program(
+    evaluate_dynamic_import_status(
+        vm,
         global,
-        br#"import("node:fs").then(() => 7, () => 6)"#,
+        br#"
+import("node:fs").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
+"#,
         b"nimbus-bun-embed-probe-dynamic-import-node-fs.js",
         207,
-    )?;
-    let Some(promise) = result.as_promise() else {
-        return Err(208);
-    };
+        208,
+        209,
+    )
+}
 
-    vm.wait_for_promise(AnyPromise::Normal(promise));
+fn evaluate_dynamic_import_status(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+    source: &[u8],
+    filename: &[u8],
+    exception_status: i32,
+    promise_rejected_status: i32,
+    mismatch_status: i32,
+) -> Result<i32, i32> {
+    evaluate_number_or_promise(
+        vm,
+        global,
+        source,
+        filename,
+        exception_status,
+        promise_rejected_status,
+        mismatch_status,
+    )
+}
 
-    let promise = JSPromise::opaque_mut(promise);
-    if promise.status() != PromiseStatus::Fulfilled {
-        return Err(209);
+fn evaluate_number_or_promise(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+    source: &[u8],
+    filename: &[u8],
+    exception_status: i32,
+    promise_rejected_status: i32,
+    mismatch_status: i32,
+) -> Result<i32, i32> {
+    let _lock = ProbeApiLock::new(vm.jsc_vm());
+    let mut result = evaluate_program(global, source, filename, exception_status)?;
+    if let Some(promise) = result.as_promise() {
+        vm.wait_for_promise(AnyPromise::Normal(promise));
+
+        let promise = JSPromise::opaque_mut(promise);
+        if promise.status() != PromiseStatus::Fulfilled {
+            return Err(promise_rejected_status);
+        }
+        result = promise.result(vm.jsc_vm());
     }
-    let result = promise.result(vm.jsc_vm());
     if !result.is_number() {
-        return Err(210);
+        return Err(mismatch_status);
     }
     Ok(result.as_number() as i32)
 }
@@ -1299,6 +1464,7 @@ fn module_policy_status_name(status: i32) -> &'static str {
         5 => "unsafe_bypass",
         6 => "rejected_by_bun_loader",
         7 => "unsafe_import_fulfilled",
+        8 => "denied_by_resolver_policy",
         _ => "unknown",
     }
 }

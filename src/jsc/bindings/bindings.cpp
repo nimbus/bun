@@ -3263,6 +3263,11 @@ JSC::JSObject* JSC__JSString__toObject(JSC::JSString* arg0, JSC::JSGlobalObject*
 
 #pragma mark - JSC::JSModuleLoader
 
+static constexpr uint8_t BunEmbedderModuleResolutionKindDynamicImport = 1;
+static constexpr uint8_t BunEmbedderModuleResolutionKindLoadAndEvaluateModule = 2;
+
+extern "C" bool Bun__embedderShouldDenyModuleResolution(JSC::JSGlobalObject*, const BunString*, uint8_t kind);
+
 // JSC::EncodedJSValue
 // JSC__JSModuleLoader__dependencyKeysIfEvaluated(JSC__JSModuleLoader* arg0,
 // JSC::JSGlobalObject* arg1, JSC__JSModuleRecord* arg2) {
@@ -3271,7 +3276,11 @@ JSC::JSObject* JSC__JSString__toObject(JSC::JSString* arg0, JSC::JSGlobalObject*
 extern "C" JSC::JSPromise* JSModuleLoader__import(JSC::JSGlobalObject* globalObject, const BunString* moduleNameStr)
 {
     auto& vm = JSC::getVM(globalObject);
-    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    if (Bun__embedderShouldDenyModuleResolution(globalObject, moduleNameStr, BunEmbedderModuleResolutionKindDynamicImport)) {
+        throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+        return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
+    }
     auto* promise = JSC::importModule(globalObject, JSC::Identifier::fromString(vm, moduleNameStr->toWTFString()), JSC::Identifier(), nullptr, nullptr);
 
     EXCEPTION_ASSERT(!!scope.exception() == !promise);
@@ -3784,8 +3793,13 @@ JSC__JSModuleLoader__loadAndEvaluateModule(JSC::JSGlobalObject* globalObject,
     const BunString* arg1)
 {
     auto& vm = JSC::getVM(globalObject);
-    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    auto scope = DECLARE_THROW_SCOPE(vm);
     auto name = makeAtomString(arg1->toWTFString());
+
+    if (Bun__embedderShouldDenyModuleResolution(globalObject, arg1, BunEmbedderModuleResolutionKindLoadAndEvaluateModule)) {
+        throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+        return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
+    }
 
     auto* promise = JSC::loadAndEvaluateModule(globalObject, name, nullptr, nullptr);
     EXCEPTION_ASSERT(!!promise == !scope.exception());
