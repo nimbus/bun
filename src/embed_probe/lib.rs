@@ -145,6 +145,26 @@ impl Drop for EmbedderResolutionDenyGuard {
     }
 }
 
+struct ProofCancellationToken {
+    cancelled: AtomicBool,
+}
+
+impl ProofCancellationToken {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
 fn run_sync_host_call_probe(vm: &mut VirtualMachine) -> i32 {
     HOST_CALL_COUNT.store(0, Ordering::SeqCst);
     HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
@@ -517,6 +537,13 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
         }
     }
 
+    if let Err(status) = evaluate_cancel_before_guest_entry(vm, global) {
+        return status;
+    }
+    if let Err(status) = evaluate_recovery_script(vm, global, 67, 68) {
+        return status;
+    }
+
     if let Err(status) = evaluate_generated_spin_with_deadline_timeout(vm, global) {
         return status;
     }
@@ -532,7 +559,7 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
     }
 
     eprintln!("nimbus bun embed cancellation policy:");
-    eprintln!("  before_guest_entry: pending_embedder_lifecycle_hook");
+    eprintln!("  before_guest_entry: owner_entry_gate_denied_and_recovered");
     eprintln!("  after_guest_entry_sync_loop: spin_entered_ack");
     eprintln!("  recovery_after_deadline_cancel: ok");
     eprintln!("  recovery_after_external_cancel: ok");
@@ -1755,6 +1782,42 @@ fn permission_classification_name(classification: i32) -> &'static str {
     }
 }
 
+fn evaluate_cancel_before_guest_entry(
+    vm: &mut VirtualMachine,
+    global: &JSGlobalObject,
+) -> Result<(), i32> {
+    let token = ProofCancellationToken::new();
+    token.cancel();
+
+    match evaluate_program_with_entry_gate(
+        global,
+        b"globalThis.__nimbusPreEntryCancelRan = true; 1",
+        b"nimbus-bun-embed-probe-before-entry-cancel.js",
+        65,
+        &token,
+        66,
+    ) {
+        Err(66) => {}
+        Err(status) => return Err(status),
+        Ok(_) => return Err(69),
+    }
+
+    let script_did_not_run = {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        evaluate_program(
+            global,
+            br#"typeof globalThis.__nimbusPreEntryCancelRan === "undefined" ? 1 : 0"#,
+            b"nimbus-bun-embed-probe-before-entry-cancel-state.js",
+            70,
+        )?
+    };
+    if !script_did_not_run.is_number() || script_did_not_run.as_number() as i32 != 1 {
+        return Err(71);
+    }
+
+    Ok(())
+}
+
 fn evaluate_generated_spin_with_deadline_timeout(
     vm: &mut VirtualMachine,
     global: &JSGlobalObject,
@@ -1950,6 +2013,20 @@ fn evaluate_program(
     }
 
     Ok(result)
+}
+
+fn evaluate_program_with_entry_gate(
+    global: &JSGlobalObject,
+    source: &[u8],
+    filename: &[u8],
+    exception_status: i32,
+    token: &ProofCancellationToken,
+    cancelled_status: i32,
+) -> Result<JSValue, i32> {
+    if token.is_cancelled() {
+        return Err(cancelled_status);
+    }
+    evaluate_program(global, source, filename, exception_status)
 }
 
 const GENERATED_SPIN_INVOCATION_SOURCE: &[u8] = br#"
