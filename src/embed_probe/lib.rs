@@ -474,6 +474,7 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
         // exception to have been materialized by the owning thread first.
         global.request_termination();
         global.clear_termination_exception();
+        vm.jsc_vm().clear_has_termination_request();
 
         let context_loaded = match evaluate_program(
             global,
@@ -1305,6 +1306,7 @@ fn module_policy_status_name(status: i32) -> &'static str {
 const LIFECYCLE_FRESH_VM_ITERATIONS: usize = 4;
 const LIFECYCLE_RETAINED_INVOCATIONS: i32 = 8;
 const LIFECYCLE_CANCEL_ITERATIONS: usize = 3;
+const CANCELLATION_PROOF_DELAY: Duration = Duration::from_millis(100);
 
 fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
     HOST_CALL_COUNT.store(0, Ordering::SeqCst);
@@ -1323,6 +1325,7 @@ fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
         let _lock = ProbeApiLock::new(vm.jsc_vm());
         global.request_termination();
         global.clear_termination_exception();
+        vm.jsc_vm().clear_has_termination_request();
 
         global.to_js_value().put(
             global,
@@ -1576,7 +1579,8 @@ fn evaluate_generated_spin_with_deadline_timeout(
     let completed_for_thread = Arc::clone(&completed);
     let deadline_for_thread = Arc::clone(&deadline_fired);
     let deadline = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(10));
+        bun_core::StackCheck::configure_thread();
+        thread::sleep(CANCELLATION_PROOF_DELAY);
         if !completed_for_thread.load(Ordering::SeqCst) {
             deadline_for_thread.store(true, Ordering::SeqCst);
             // SAFETY: the proof joins this thread before the VM can be torn down.
@@ -1634,7 +1638,8 @@ fn evaluate_generated_spin_with_external_cancel(
     let completed_for_thread = Arc::clone(&completed);
     let cancel_for_thread = Arc::clone(&cancel_fired);
     let canceller = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(10));
+        bun_core::StackCheck::configure_thread();
+        thread::sleep(CANCELLATION_PROOF_DELAY);
         if !completed_for_thread.load(Ordering::SeqCst) {
             cancel_for_thread.store(true, Ordering::SeqCst);
             // SAFETY: the proof joins this thread before the VM can be torn down.
