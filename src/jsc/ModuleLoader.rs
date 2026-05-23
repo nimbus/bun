@@ -9,6 +9,7 @@
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use bun_alloc::Arena as ArenaAllocator;
 use bun_options_types::LoaderExt as _;
@@ -44,10 +45,73 @@ pub struct ModuleLoader {
 
 pub static IS_ALLOWED_TO_USE_INTERNAL_TESTING_APIS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+static EMBEDDER_DENY_ALL_MODULE_RESOLUTION: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 pub fn set_is_allowed_to_use_internal_testing_apis(v: bool) {
     IS_ALLOWED_TO_USE_INTERNAL_TESTING_APIS.store(v, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbedderModuleResolutionKind {
+    DynamicImport = 1,
+    LoadAndEvaluateModule = 2,
+    BunResolve = 3,
+    BunResolveSync = 4,
+    ImportMetaResolve = 5,
+    RequireResolve = 6,
+}
+
+impl EmbedderModuleResolutionKind {
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::DynamicImport),
+            2 => Some(Self::LoadAndEvaluateModule),
+            3 => Some(Self::BunResolve),
+            4 => Some(Self::BunResolveSync),
+            5 => Some(Self::ImportMetaResolve),
+            6 => Some(Self::RequireResolve),
+            _ => None,
+        }
+    }
+}
+
+#[inline]
+pub fn set_embedder_deny_all_module_resolution_for_testing(deny: bool) {
+    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.store(deny, Ordering::SeqCst);
+}
+
+#[inline]
+pub fn embedder_should_deny_module_resolution(
+    _global_object: &JSGlobalObject,
+    _specifier: &bun_core::String,
+    _kind: EmbedderModuleResolutionKind,
+) -> bool {
+    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.load(Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Bun__embedderShouldDenyModuleResolution(
+    global_object: *mut JSGlobalObject,
+    specifier: *const bun_core::String,
+    kind: u8,
+) -> bool {
+    let Some(kind) = EmbedderModuleResolutionKind::from_u8(kind) else {
+        return false;
+    };
+    let (Some(global_object), Some(specifier)) = (
+        core::ptr::NonNull::new(global_object),
+        core::ptr::NonNull::new(specifier as *mut bun_core::String),
+    ) else {
+        return false;
+    };
+    embedder_should_deny_module_resolution(
+        JSGlobalObject::opaque_ref(global_object.as_ptr()),
+        // SAFETY: C++ passes a live `BunString` for the duration of the sync policy check.
+        unsafe { specifier.as_ref() },
+        kind,
+    )
 }
 
 impl ModuleLoader {

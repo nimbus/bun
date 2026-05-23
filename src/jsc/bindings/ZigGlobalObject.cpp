@@ -266,6 +266,10 @@ extern "C" unsigned getJSCBytecodeCacheVersion()
     return getWebKitBytecodeCacheVersion();
 }
 
+static constexpr uint8_t BunEmbedderModuleResolutionKindDynamicImport = 1;
+
+extern "C" bool Bun__embedderShouldDenyModuleResolution(JSC::JSGlobalObject*, const BunString*, uint8_t kind);
+
 // Declare fuzzilli function registration from FuzzilliREPRL.cpp
 #ifdef FUZZILLI_ENABLED
 extern "C" void Bun__REPRL__registerFuzzilliFunctions(Zig::GlobalObject*);
@@ -3467,6 +3471,15 @@ JSC::JSPromise* GlobalObject::moduleLoaderImportModule(JSGlobalObject* jsGlobalO
 
     auto moduleName = moduleNameValue->value(globalObject);
     RETURN_IF_EXCEPTION(scope, nullptr);
+    {
+        auto moduleNamePolicyString = Bun::toStringRef(moduleName);
+        if (Bun__embedderShouldDenyModuleResolution(globalObject, &moduleNamePolicyString, BunEmbedderModuleResolutionKindDynamicImport)) {
+            moduleNamePolicyString.deref();
+            throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+            return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
+        }
+        moduleNamePolicyString.deref();
+    }
     if (globalObject->onLoadPlugins.hasVirtualModules()) {
         if (auto resolution = globalObject->onLoadPlugins.resolveVirtualModule(moduleName, sourceOrigin.url().protocolIsFile() ? sourceOrigin.url().fileSystemPath() : String())) {
             resolvedIdentifier = JSC::Identifier::fromString(vm, resolution.value());
