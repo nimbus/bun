@@ -531,6 +531,13 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
         return status;
     }
 
+    eprintln!("nimbus bun embed cancellation policy:");
+    eprintln!("  before_guest_entry: pending_embedder_lifecycle_hook");
+    eprintln!("  after_guest_entry_sync_loop: spin_entered_ack");
+    eprintln!("  recovery_after_deadline_cancel: ok");
+    eprintln!("  recovery_after_external_cancel: ok");
+    eprintln!("  cancellation_timing_policy: state_ack_not_sleep");
+
     0
 }
 
@@ -1670,9 +1677,12 @@ globalThis.__nimbusCreateContext = () => ({
     );
     eprintln!("  external_cancel_trigger: spin_entered_ack");
     eprintln!("  cancellation_timing_policy: state_ack_not_sleep");
+    eprintln!("  normal_completion_before_cancel: retained_invocations_ok");
+    eprintln!("  promise_microtask_progress: async_host_bridge_ok");
+    eprintln!("  teardown_loop: fresh_vm_create_invoke_destroy_ok");
     eprintln!("  retained_vm_post_cancel_invocation: ok");
     eprintln!("  retained_vm_reuse: trusted_generated_wrapper_ok");
-    eprintln!("  product_first_policy: fresh_vm_or_discard_until_containment");
+    eprintln!("  product_first_policy: fresh_vm_or_discard_with_outer_quota_required");
 
     0
 }
