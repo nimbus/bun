@@ -1168,43 +1168,6 @@ pub(crate) fn shrink(global_object: &JSGlobalObject, _: &CallFrame) -> JsResult<
     Ok(JSValue::UNDEFINED)
 }
 
-fn do_resolve(global_this: &JSGlobalObject, arguments: &[JSValue]) -> JsResult<JSValue> {
-    // SAFETY: bun_vm() returns the live per-thread singleton.
-    let vm = global_this.bun_vm();
-    let mut args = ArgumentsSlice::init(vm, arguments);
-    let Some(specifier) = args.protect_eat_next() else {
-        return Err(global_this
-            .throw_invalid_arguments(format_args!("Expected a specifier and a from path")));
-    };
-
-    if specifier.is_undefined_or_null() {
-        return Err(global_this.throw_invalid_arguments(format_args!("specifier must be a string")));
-    }
-
-    let Some(from) = args.protect_eat_next() else {
-        return Err(global_this.throw_invalid_arguments(format_args!("Expected a from path")));
-    };
-
-    if from.is_undefined_or_null() {
-        return Err(global_this.throw_invalid_arguments(format_args!("from must be a string")));
-    }
-
-    let mut is_esm = true;
-    if let Some(next) = args.next_eat() {
-        if next.is_boolean() {
-            is_esm = next.to_boolean();
-        } else {
-            return Err(global_this.throw_invalid_arguments(format_args!("esm must be a boolean")));
-        }
-    }
-
-    let specifier_str = specifier.to_bun_string(global_this)?;
-    let specifier_str = scopeguard::guard(specifier_str, |s| s.deref());
-    let from_str = from.to_bun_string(global_this)?;
-    let from_str = scopeguard::guard(from_str, |s| s.deref());
-    do_resolve_with_args::<false>(global_this, *specifier_str, *from_str, is_esm, false)
-}
-
 /// Single Drop point for the three `BunString`s `do_resolve_with_args` may own.
 /// Replaces three separate `scopeguard::guard(_, |s| s.deref())` closures —
 /// each of which generated its own drop frame and landing pad — with one
@@ -1234,6 +1197,7 @@ fn do_resolve_with_args<const IS_FILE_PATH: bool>(
     from: BunString,
     is_esm: bool,
     is_user_require_resolve: bool,
+    resolution_kind: jsc::ModuleLoader::EmbedderModuleResolutionKind,
 ) -> JsResult<JSValue> {
     let mut errorable: ErrorableString = ErrorableString::ok(BunString::empty());
     let mut owned = ResolveDerefOnDrop {
@@ -1251,6 +1215,16 @@ fn do_resolve_with_args<const IS_FILE_PATH: bool>(
     } else {
         specifier
     };
+
+    if jsc::ModuleLoader::embedder_should_deny_module_resolution(
+        ctx,
+        &specifier_for_resolve,
+        resolution_kind,
+    ) {
+        return Err(
+            ctx.throw_invalid_arguments(format_args!("Bun embedder denied module resolution"))
+        );
+    }
 
     VirtualMachine::resolve_maybe_needs_trailing_slash::<IS_FILE_PATH>(
         &mut errorable,
@@ -1289,13 +1263,21 @@ pub(crate) fn resolve_sync(
     global_object: &JSGlobalObject,
     callframe: &CallFrame,
 ) -> JsResult<JSValue> {
-    do_resolve(global_object, callframe.arguments())
+    do_resolve_with_kind(
+        global_object,
+        callframe.arguments(),
+        jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync,
+    )
 }
 
 #[bun_jsc::host_fn]
 pub(crate) fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
     let arguments = callframe.arguments_old::<3>();
-    let value = match do_resolve(global_object, arguments.slice()) {
+    let value = match do_resolve_with_kind(
+        global_object,
+        arguments.slice(),
+        jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolve,
+    ) {
         Ok(v) => v,
         Err(e) => {
             let err = global_object.take_error(e);
@@ -1308,6 +1290,54 @@ pub(crate) fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> 
         }
     };
     Ok(JSPromise::resolved_promise_value(global_object, value))
+}
+
+fn do_resolve_with_kind(
+    global_this: &JSGlobalObject,
+    arguments: &[JSValue],
+    resolution_kind: jsc::ModuleLoader::EmbedderModuleResolutionKind,
+) -> JsResult<JSValue> {
+    // SAFETY: bun_vm() returns the live per-thread singleton.
+    let vm = global_this.bun_vm();
+    let mut args = ArgumentsSlice::init(vm, arguments);
+    let Some(specifier) = args.protect_eat_next() else {
+        return Err(global_this
+            .throw_invalid_arguments(format_args!("Expected a specifier and a from path")));
+    };
+
+    if specifier.is_undefined_or_null() {
+        return Err(global_this.throw_invalid_arguments(format_args!("specifier must be a string")));
+    }
+
+    let Some(from) = args.protect_eat_next() else {
+        return Err(global_this.throw_invalid_arguments(format_args!("Expected a from path")));
+    };
+
+    if from.is_undefined_or_null() {
+        return Err(global_this.throw_invalid_arguments(format_args!("from must be a string")));
+    }
+
+    let mut is_esm = true;
+    if let Some(next) = args.next_eat() {
+        if next.is_boolean() {
+            is_esm = next.to_boolean();
+        } else {
+            return Err(global_this.throw_invalid_arguments(format_args!("esm must be a boolean")));
+        }
+    }
+
+    let specifier_str = specifier.to_bun_string(global_this)?;
+    let specifier_str = scopeguard::guard(specifier_str, |s| s.deref());
+    let from_str = from.to_bun_string(global_this)?;
+    let from_str = scopeguard::guard(from_str, |s| s.deref());
+    do_resolve_with_args::<false>(
+        global_this,
+        *specifier_str,
+        *from_str,
+        is_esm,
+        false,
+        resolution_kind,
+    )
 }
 
 // HOST_EXPORT(Bun__resolve, c)
@@ -1327,16 +1357,22 @@ pub fn bun_resolve(
     };
     let source_str = scopeguard::guard(source_str, |s| s.deref());
 
-    let value =
-        match do_resolve_with_args::<true>(global, *specifier_str, *source_str, is_esm, false) {
-            Ok(v) => v,
-            Err(_) => {
-                let err = global.try_take_exception().unwrap();
-                return JSPromise::dangerously_create_rejected_promise_value_without_notifying_vm(
-                    global, err,
-                );
-            }
-        };
+    let value = match do_resolve_with_args::<true>(
+        global,
+        *specifier_str,
+        *source_str,
+        is_esm,
+        false,
+        jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolve,
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            let err = global.try_take_exception().unwrap();
+            return JSPromise::dangerously_create_rejected_promise_value_without_notifying_vm(
+                global, err,
+            );
+        }
+    };
 
     JSPromise::resolved_promise_value(global, value)
 }
@@ -1376,6 +1412,11 @@ pub fn bun_resolve_sync(
             *source_str,
             is_esm,
             is_user_require_resolve,
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync
+            },
         )
     })
 }
@@ -1444,6 +1485,11 @@ pub fn bun_resolve_sync_with_paths(
             *source_str,
             is_esm,
             is_user_require_resolve,
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolveSync
+            },
         )
     })
 }
@@ -1464,7 +1510,14 @@ pub fn bun_resolve_sync_with_strings(
         specifier
     );
     jsc::to_js_host_call(global, || {
-        do_resolve_with_args::<true>(global, *specifier, *source, is_esm, false)
+        do_resolve_with_args::<true>(
+            global,
+            *specifier,
+            *source,
+            is_esm,
+            false,
+            jsc::ModuleLoader::EmbedderModuleResolutionKind::ImportMetaResolve,
+        )
     })
 }
 
@@ -1496,6 +1549,11 @@ pub fn bun_resolve_sync_with_source(
             *source,
             is_esm,
             is_user_require_resolve,
+            if is_user_require_resolve {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::RequireResolve
+            } else {
+                jsc::ModuleLoader::EmbedderModuleResolutionKind::ImportMetaResolve
+            },
         )
     })
 }
