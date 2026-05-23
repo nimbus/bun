@@ -6,7 +6,7 @@
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
-use std::{sync::Arc, thread, time::Duration};
+use std::{sync::Arc, thread};
 
 use bun_jsc::virtual_machine::{InitOptions, VirtualMachine};
 use bun_jsc::{
@@ -27,6 +27,7 @@ static ASYNC_HOST_CALL_PAYLOAD: AtomicI32 = AtomicI32::new(0);
 static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
 static SAFETY_VTABLES_REGISTERED: AtomicBool = AtomicBool::new(false);
+static SPIN_ENTERED_ACK: AtomicBool = AtomicBool::new(false);
 
 const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
 
@@ -1479,7 +1480,7 @@ fn module_policy_status_name(status: i32) -> &'static str {
 const LIFECYCLE_FRESH_VM_ITERATIONS: usize = 4;
 const LIFECYCLE_RETAINED_INVOCATIONS: i32 = 8;
 const LIFECYCLE_CANCEL_ITERATIONS: usize = 3;
-const CANCELLATION_PROOF_DELAY: Duration = Duration::from_millis(100);
+const CANCELLATION_PROOF_MAX_ACK_SPINS: usize = 1_000_000;
 
 fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
     HOST_CALL_COUNT.store(0, Ordering::SeqCst);
@@ -1667,6 +1668,8 @@ globalThis.__nimbusCreateContext = () => ({
         "  external_cancel_recovery_iterations: {}",
         LIFECYCLE_CANCEL_ITERATIONS
     );
+    eprintln!("  external_cancel_trigger: spin_entered_ack");
+    eprintln!("  cancellation_timing_policy: state_ack_not_sleep");
     eprintln!("  retained_vm_post_cancel_invocation: ok");
     eprintln!("  retained_vm_reuse: trusted_generated_wrapper_ok");
     eprintln!("  product_first_policy: fresh_vm_or_discard_until_containment");
@@ -1748,12 +1751,24 @@ fn evaluate_generated_spin_with_deadline_timeout(
 ) -> Result<(), i32> {
     let completed = Arc::new(AtomicBool::new(false));
     let deadline_fired = Arc::new(AtomicBool::new(false));
+    let deadline_ack_observed = Arc::new(AtomicBool::new(false));
     let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
     let completed_for_thread = Arc::clone(&completed);
     let deadline_for_thread = Arc::clone(&deadline_fired);
+    let deadline_ack_for_thread = Arc::clone(&deadline_ack_observed);
+    SPIN_ENTERED_ACK.store(false, Ordering::SeqCst);
     let deadline = thread::spawn(move || {
         bun_core::StackCheck::configure_thread();
-        thread::sleep(CANCELLATION_PROOF_DELAY);
+        for _ in 0..CANCELLATION_PROOF_MAX_ACK_SPINS {
+            if completed_for_thread.load(Ordering::SeqCst) {
+                return;
+            }
+            if SPIN_ENTERED_ACK.load(Ordering::SeqCst) {
+                deadline_ack_for_thread.store(true, Ordering::SeqCst);
+                break;
+            }
+            thread::yield_now();
+        }
         if !completed_for_thread.load(Ordering::SeqCst) {
             deadline_for_thread.store(true, Ordering::SeqCst);
             // SAFETY: the proof joins this thread before the VM can be torn down.
@@ -1789,14 +1804,17 @@ fn evaluate_generated_spin_with_deadline_timeout(
     global.clear_termination_exception();
 
     result?;
-    if !deadline_fired.load(Ordering::SeqCst) {
+    if !deadline_ack_observed.load(Ordering::SeqCst) {
         return Err(47);
     }
-    if vm.jsc_vm().has_execution_time_limit() {
+    if !deadline_fired.load(Ordering::SeqCst) {
         return Err(48);
     }
-    if vm.jsc_vm().has_termination_request() {
+    if vm.jsc_vm().has_execution_time_limit() {
         return Err(49);
+    }
+    if vm.jsc_vm().has_termination_request() {
+        return Err(64);
     }
     Ok(())
 }
@@ -1807,12 +1825,24 @@ fn evaluate_generated_spin_with_external_cancel(
 ) -> Result<(), i32> {
     let completed = Arc::new(AtomicBool::new(false));
     let cancel_fired = Arc::new(AtomicBool::new(false));
+    let cancel_ack_observed = Arc::new(AtomicBool::new(false));
     let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
     let completed_for_thread = Arc::clone(&completed);
     let cancel_for_thread = Arc::clone(&cancel_fired);
+    let cancel_ack_for_thread = Arc::clone(&cancel_ack_observed);
+    SPIN_ENTERED_ACK.store(false, Ordering::SeqCst);
     let canceller = thread::spawn(move || {
         bun_core::StackCheck::configure_thread();
-        thread::sleep(CANCELLATION_PROOF_DELAY);
+        for _ in 0..CANCELLATION_PROOF_MAX_ACK_SPINS {
+            if completed_for_thread.load(Ordering::SeqCst) {
+                return;
+            }
+            if SPIN_ENTERED_ACK.load(Ordering::SeqCst) {
+                cancel_ack_for_thread.store(true, Ordering::SeqCst);
+                break;
+            }
+            thread::yield_now();
+        }
         if !completed_for_thread.load(Ordering::SeqCst) {
             cancel_for_thread.store(true, Ordering::SeqCst);
             // SAFETY: the proof joins this thread before the VM can be torn down.
@@ -1848,14 +1878,17 @@ fn evaluate_generated_spin_with_external_cancel(
     global.clear_termination_exception();
 
     result?;
-    if !cancel_fired.load(Ordering::SeqCst) {
+    if !cancel_ack_observed.load(Ordering::SeqCst) {
         return Err(56);
     }
-    if vm.jsc_vm().has_termination_request() {
+    if !cancel_fired.load(Ordering::SeqCst) {
         return Err(57);
     }
-    if vm.jsc_vm().has_execution_time_limit() {
+    if vm.jsc_vm().has_termination_request() {
         return Err(58);
+    }
+    if vm.jsc_vm().has_execution_time_limit() {
+        return Err(59);
     }
     Ok(())
 }
@@ -1918,6 +1951,9 @@ globalThis.__nimbusInvoke({
     body: {
       trim() {
         globalThis.__nimbusSpinEntered = true;
+        if (typeof globalThis.__nimbusAcknowledgeSpinEntered === "function") {
+          globalThis.__nimbusAcknowledgeSpinEntered();
+        }
         return "hello";
       },
     },
@@ -1937,6 +1973,18 @@ fn evaluate_generated_spin(
     exception_status: i32,
     promise_status: i32,
 ) -> Result<SpinEvaluation, i32> {
+    global.to_js_value().put(
+        global,
+        b"__nimbusAcknowledgeSpinEntered",
+        JSFunction::create(
+            global,
+            "__nimbusAcknowledgeSpinEntered",
+            __jsc_host_nimbus_bun_embed_spin_entered_ack,
+            0,
+            Default::default(),
+        ),
+    );
+
     let mut exception = JSValue::ZERO;
     // SAFETY: `global` is the live VM global; source and filename byte slices
     // are valid for the duration of this synchronous program evaluation; and
@@ -2113,4 +2161,13 @@ pub fn nimbus_bun_embed_async_host_call(
         ));
 
     Ok(promise.to_js())
+}
+
+#[bun_jsc::host_fn]
+pub fn nimbus_bun_embed_spin_entered_ack(
+    _global: &JSGlobalObject,
+    _frame: &CallFrame,
+) -> JsResult<JSValue> {
+    SPIN_ENTERED_ACK.store(true, Ordering::SeqCst);
+    Ok(JSValue::js_number_from_int32(1))
 }
