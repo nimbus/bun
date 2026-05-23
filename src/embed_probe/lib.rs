@@ -74,6 +74,11 @@ pub extern "C" fn nimbus_bun_embed_probe_permission_surface_inventory() -> i32 {
     construct_vm_and_run(run_permission_surface_inventory_probe)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_probe_memory_behavior() -> i32 {
+    construct_vm_and_run(run_memory_behavior_probe)
+}
+
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
@@ -791,6 +796,228 @@ globalThis.__nimbusCreateContext = () => ({});
             permission_classification_name(classification)
         );
     }
+
+    0
+}
+
+const MEMORY_BEHAVIOR_INVOCATION_COUNT: i32 = 16;
+
+fn run_memory_behavior_probe(vm: &mut VirtualMachine) -> i32 {
+    HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    HOST_CALL_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RUN_COUNT.store(0, Ordering::SeqCst);
+    ASYNC_HOST_CALL_PAYLOAD.store(0, Ordering::SeqCst);
+    ASYNC_TASK_RETURNED.store(0, Ordering::SeqCst);
+    ASYNC_PROMISE.store(core::ptr::null_mut(), Ordering::SeqCst);
+
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    {
+        let _lock = vm.jsc_vm().get_api_lock();
+
+        global.to_js_value().put(
+            global,
+            b"__nimbusHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusHostCall",
+                __jsc_host_nimbus_bun_embed_sync_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+        global.to_js_value().put(
+            global,
+            b"__nimbusAsyncHostCall",
+            JSFunction::create(
+                global,
+                "__nimbusAsyncHostCall",
+                __jsc_host_nimbus_bun_embed_async_host_call,
+                1,
+                Default::default(),
+            ),
+        );
+
+        let context_loaded = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusMemoryProbeState = {
+  dbObserved: -1,
+  insertCount: 0,
+  scheduleCount: 0,
+  scheduleHostResult: -1,
+};
+globalThis.__nimbusCreateContext = () => ({
+  db: {
+    insert: async (_table, document) => {
+      const observed = await globalThis.__nimbusAsyncHostCall(41);
+      const state = globalThis.__nimbusMemoryProbeState;
+      state.dbObserved = observed;
+      state.insertCount += 1;
+      return document && document.body
+        ? `message-id-${state.insertCount}`
+        : "message-id-missing-body";
+    },
+  },
+  scheduler: {
+    runAfter: async () => {
+      const state = globalThis.__nimbusMemoryProbeState;
+      state.scheduleCount += 1;
+      state.scheduleHostResult = globalThis.__nimbusHostCall(41);
+      return `job-id-${state.scheduleCount}`;
+    },
+  },
+});
+1
+"#,
+            b"nimbus-bun-embed-probe-memory-context.js",
+            180,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !context_loaded.is_number() || context_loaded.as_number() as i32 != 1 {
+            return 181;
+        }
+
+        if let Err(status) = evaluate_program(
+            global,
+            GENERATED_NIMBUS_PROGRAM_BUNDLE,
+            b"nimbus-bun-embed-probe-memory-generated-program-bundle.js",
+            182,
+        ) {
+            return status;
+        }
+    }
+
+    let heap_after_setup_gc = vm.garbage_collect(true);
+    let heap_before_load = vm.jsc_vm().heap_size();
+
+    let invocation_promise = {
+        let _lock = vm.jsc_vm().get_api_lock();
+        let result = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusMemoryRetained = [];
+globalThis.__nimbusMemoryProbe = async () => {
+  for (let i = 0; i < 16; i += 1) {
+    const payload = "x".repeat(64 * 1024) + ":" + i;
+    const cells = Array.from({ length: 2048 }, (_value, j) => ({
+      i,
+      j,
+      payload,
+      marker: `cell-${i}-${j}`,
+    }));
+    globalThis.__nimbusMemoryRetained.push({ payload, cells });
+    const response = await globalThis.__nimbusInvoke({
+      kind: "mutation",
+      function_name: "messages:sendAndSchedule",
+      args: { body: payload.slice(0, 64) },
+    });
+    if (response.status !== "ok") {
+      return -1;
+    }
+  }
+  return globalThis.__nimbusMemoryRetained.length;
+};
+globalThis.__nimbusMemoryProbe()
+"#,
+            b"nimbus-bun-embed-probe-memory-invocations.js",
+            183,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        match result.as_promise() {
+            Some(promise) => promise,
+            None => return 184,
+        }
+    };
+
+    {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        vm.wait_for_promise(AnyPromise::Normal(invocation_promise));
+
+        let promise = JSPromise::opaque_mut(invocation_promise);
+        if promise.status() != PromiseStatus::Fulfilled {
+            return 185;
+        }
+        let result = promise.result(vm.jsc_vm());
+        if !result.is_number() || result.as_number() as i32 != MEMORY_BEHAVIOR_INVOCATION_COUNT {
+            return 186;
+        }
+    }
+
+    if ASYNC_HOST_CALL_COUNT.load(Ordering::SeqCst) != MEMORY_BEHAVIOR_INVOCATION_COUNT {
+        return 187;
+    }
+    if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != MEMORY_BEHAVIOR_INVOCATION_COUNT {
+        return 188;
+    }
+    if HOST_CALL_COUNT.load(Ordering::SeqCst) != MEMORY_BEHAVIOR_INVOCATION_COUNT {
+        return 189;
+    }
+
+    let heap_after_load = vm.jsc_vm().heap_size();
+    let heap_retained_after_gc = vm.garbage_collect(true);
+
+    {
+        let _lock = vm.jsc_vm().get_api_lock();
+        let released = match evaluate_program(
+            global,
+            br#"
+globalThis.__nimbusMemoryRetained = null;
+globalThis.__nimbusMemoryProbe = undefined;
+1
+"#,
+            b"nimbus-bun-embed-probe-memory-release.js",
+            190,
+        ) {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+        if !released.is_number() || released.as_number() as i32 != 1 {
+            return 191;
+        }
+    }
+
+    let heap_after_release_gc = vm.garbage_collect(true);
+    let heap_after_shrink = {
+        let _lock = vm.jsc_vm().get_api_lock();
+        vm.jsc_vm().shrink_footprint();
+        vm.jsc_vm().heap_size()
+    };
+
+    if heap_after_load <= heap_before_load {
+        return 192;
+    }
+
+    eprintln!("nimbus bun embed memory behavior:");
+    eprintln!("  invocation_count: {MEMORY_BEHAVIOR_INVOCATION_COUNT}");
+    eprintln!("  heap_after_setup_gc_bytes: {heap_after_setup_gc}");
+    eprintln!("  heap_before_load_bytes: {heap_before_load}");
+    eprintln!("  heap_after_load_bytes: {heap_after_load}");
+    eprintln!("  heap_retained_after_gc_bytes: {heap_retained_after_gc}");
+    eprintln!("  heap_after_release_gc_bytes: {heap_after_release_gc}");
+    eprintln!("  heap_after_shrink_bytes: {heap_after_shrink}");
+    eprintln!(
+        "  observed_load_growth_bytes: {}",
+        heap_after_load.saturating_sub(heap_before_load)
+    );
+    eprintln!(
+        "  observed_gc_retained_growth_bytes: {}",
+        heap_retained_after_gc.saturating_sub(heap_after_setup_gc)
+    );
+    eprintln!(
+        "  observed_release_drop_bytes: {}",
+        heap_retained_after_gc.saturating_sub(heap_after_release_gc)
+    );
+    eprintln!("  hard_heap_limit: not_observed");
+    eprintln!("  pressure_signal: vm.heap_size_and_sync_gc");
+    eprintln!("  safe_first_policy: fresh_vm_or_discard_on_pressure");
 
     0
 }
