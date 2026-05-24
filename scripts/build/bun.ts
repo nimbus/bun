@@ -696,6 +696,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       'extern "C" int nimbus_bun_embed_probe_memory_behavior();',
       'extern "C" int nimbus_bun_embed_probe_package_module_policy();',
       'extern "C" int nimbus_bun_embed_probe_lifecycle_reuse_stress();',
+      'extern "C" int nimbus_bun_embed_invoke_program_wrapper_json(const unsigned char*, unsigned long, const unsigned char*, unsigned long, unsigned char*, unsigned long, unsigned long*);',
       "",
       "int main() {",
       "  int status = nimbus_bun_embed_probe_construct_and_destroy_vm();",
@@ -714,7 +715,15 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "  if (status != 0) return status;",
       "  status = nimbus_bun_embed_probe_package_module_policy();",
       "  if (status != 0) return status;",
-      "  return nimbus_bun_embed_probe_lifecycle_reuse_stress();",
+      "  status = nimbus_bun_embed_probe_lifecycle_reuse_stress();",
+      "  if (status != 0) return status;",
+      '  const unsigned char bundle[] = "globalThis.__nimbusInvoke = async function(request) { return { status: \\"ok\\", value: { functionName: request.function_name, args: request.args, engine: \\"bun_jsc\\" } }; };";',
+      '  const unsigned char request[] = "{\\"kind\\":\\"query\\",\\"function_name\\":\\"messages:bunProof\\",\\"args\\":{\\"body\\":\\"hello\\"}}";',
+      "  unsigned char output[512];",
+      "  unsigned long output_len = 0;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len);",
+      "  if (status != 0) return status;",
+      "  return output_len > 0 ? 0 : 250;",
       "}",
       "",
     ].join("\n"),
@@ -725,6 +734,17 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
     implicitInputs: input.depHeaderSignal,
     orderOnlyInputs: input.codegenOrderOnly,
   });
+
+  writeIfChanged(
+    resolve(cfg.buildDir, "nimbus-bun-embed-link-args.txt"),
+    [
+      ...input.allObjects,
+      ...input.rustObjects,
+      ...input.windowsRes,
+      ...input.depLibs,
+      ...input.ldflags,
+    ].join("\n") + "\n",
+  );
 
   const exe = link(
     n,

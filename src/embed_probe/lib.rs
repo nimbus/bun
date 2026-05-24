@@ -6,7 +6,7 @@
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
-use std::{sync::Arc, thread};
+use std::{slice, str, sync::Arc, thread};
 
 use bun_jsc::virtual_machine::{InitOptions, VirtualMachine};
 use bun_jsc::{
@@ -96,6 +96,44 @@ pub extern "C" fn nimbus_bun_embed_probe_lifecycle_reuse_stress() -> i32 {
         }
     }
     construct_vm_and_run(run_lifecycle_reuse_stress_probe)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
+    bundle_ptr: *const u8,
+    bundle_len: usize,
+    request_ptr: *const u8,
+    request_len: usize,
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+) -> i32 {
+    if bundle_ptr.is_null() || request_ptr.is_null() || output_ptr.is_null() || output_len.is_null()
+    {
+        return 300;
+    }
+
+    // SAFETY: pointer validity is the caller's ABI contract. The slices are
+    // consumed synchronously before the function returns and are never stored.
+    let bundle_source = unsafe { slice::from_raw_parts(bundle_ptr, bundle_len) };
+    // SAFETY: pointer validity is the caller's ABI contract. The slices are
+    // consumed synchronously before the function returns and are never stored.
+    let request_bytes = unsafe { slice::from_raw_parts(request_ptr, request_len) };
+    let request_json = match str::from_utf8(request_bytes) {
+        Ok(request_json) => request_json,
+        Err(_) => return 301,
+    };
+
+    construct_vm_and_run(|vm| {
+        run_program_wrapper_json_invocation(
+            vm,
+            bundle_source,
+            request_json,
+            output_ptr,
+            output_cap,
+            output_len,
+        )
+    })
 }
 
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
@@ -500,6 +538,91 @@ globalThis.__nimbusGeneratedProgramPromise
         }
     }
 
+    0
+}
+
+fn run_program_wrapper_json_invocation(
+    vm: &mut VirtualMachine,
+    bundle_source: &[u8],
+    request_json: &str,
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+) -> i32 {
+    vm.event_loop_mut().ensure_waker();
+
+    let global = vm.global();
+    let _resolution_deny_guard = EmbedderResolutionDenyGuard::new();
+    let _lock = ProbeApiLock::new(vm.jsc_vm());
+
+    // SAFETY: this fresh embedder VM is single-threaded under the JSC API lock.
+    // The native helper mutates only the current global object's permission
+    // profile before tenant code is evaluated.
+    unsafe {
+        Bun__embedderApplyNativePermissionDenyProfileForTesting(
+            global as *const JSGlobalObject as *mut JSGlobalObject,
+        );
+    }
+
+    if let Err(status) = evaluate_program(
+        global,
+        bundle_source,
+        b"nimbus-bun-linked-adapter-program-wrapper.js",
+        302,
+    ) {
+        return status;
+    }
+
+    let invocation_source = format!("globalThis.__nimbusInvoke({request_json})");
+    let result = match evaluate_program(
+        global,
+        invocation_source.as_bytes(),
+        b"nimbus-bun-linked-adapter-invoke.js",
+        303,
+    ) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+
+    let result = match result.as_promise() {
+        Some(promise) => {
+            vm.wait_for_promise(AnyPromise::Normal(promise));
+            let promise = JSPromise::opaque_mut(promise);
+            if promise.status() != PromiseStatus::Fulfilled {
+                return 304;
+            }
+            promise.result(vm.jsc_vm())
+        }
+        None => result,
+    };
+
+    let mut json_output = bun_core::String::default();
+    if result
+        .json_stringify_fast(global, &mut json_output)
+        .is_err()
+    {
+        return 305;
+    }
+    let json_output = bun_core::OwnedString::new(json_output);
+    if json_output.tag() == bun_core::Tag::Dead {
+        return 306;
+    }
+    let json_output = json_output.to_utf8();
+    let response = json_output.slice();
+
+    // SAFETY: `output_len` was validated non-null and is owned by the caller.
+    unsafe {
+        *output_len = response.len();
+    }
+    if response.len() > output_cap {
+        return 307;
+    }
+
+    // SAFETY: `output_ptr` was validated non-null and the caller advertised at
+    // least `output_cap` writable bytes. The length check above bounds the copy.
+    unsafe {
+        core::ptr::copy_nonoverlapping(response.as_ptr(), output_ptr, response.len());
+    }
     0
 }
 
