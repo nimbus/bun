@@ -1201,7 +1201,7 @@ function emitNestedCmake(
   //
   // Windows has no PIC concept (all code is relocatable), so both branches
   // are guarded — no-op there.
-  if (spec.pic) {
+  if (spec.pic || cfg.embedderShared) {
     if (!cfg.windows) {
       cflags += " -fPIC";
       cxxflags += " -fPIC";
@@ -1489,7 +1489,7 @@ function emitDirect(
   // codegen as cmake deps would. spec.pic → -fPIC; otherwise on darwin
   // undo apple-clang's PIC default to match the non-PIE final binary.
   const picFlags: string[] = [];
-  if (spec.pic) {
+  if (spec.pic || cfg.embedderShared) {
     if (!cfg.windows) picFlags.push("-fPIC");
   } else if (cfg.darwin) {
     picFlags.push("-fno-pic", "-fno-pie");

@@ -161,6 +161,8 @@ export interface Config {
   // ─── Dependency modes ───
   webkit: WebKitMode;
   simdutfNamespace: string | undefined;
+  /** Build the Nimbus Bun/JSC embedder as a PIC shared adapter artifact. */
+  embedderShared: boolean;
 
   // ─── Paths (all absolute) ───
   /** Repository root. */
@@ -306,6 +308,7 @@ export interface PartialConfig {
   buildkite?: boolean;
   webkit?: WebKitMode;
   simdutfNamespace?: string;
+  embedderShared?: boolean;
   buildDir?: string;
   cacheDir?: string;
   /** Override NDK location (default: $ANDROID_NDK_ROOT etc). Only used when abi=android. */
@@ -825,6 +828,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const webkitVersion = partial.webkitVersion ?? versionDefaults.webkitVersion;
   const webkit = partial.webkit ?? "prebuilt";
   const simdutfNamespace = partial.simdutfNamespace;
+  const embedderShared = partial.embedderShared ?? false;
   if (simdutfNamespace !== undefined) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(simdutfNamespace)) {
       throw new BuildError("--simdutf-namespace must be a valid C++ identifier", {
@@ -839,6 +843,18 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     if (webkit !== "local") {
       throw new BuildError("--simdutf-namespace requires --webkit=local", {
         hint: "Prebuilt WebKit archives already contain public simdutf symbols; use a local WebKit source build so the namespace is applied to WebKit and Bun together.",
+      });
+    }
+  }
+  if (embedderShared) {
+    if (!unix || windows) {
+      throw new BuildError("--embedder-shared is currently supported only on Unix targets", {
+        hint: "Nimbus first needs the Linux/macOS in-process adapter proof before adding Windows loader semantics.",
+      });
+    }
+    if (webkit !== "local") {
+      throw new BuildError("--embedder-shared requires --webkit=local", {
+        hint: "The shared adapter needs PIC WebKit/JSC objects built from source, not the current non-PIC prebuilt archives.",
       });
     }
   }
@@ -896,6 +912,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     buildkite,
     webkit,
     simdutfNamespace,
+    embedderShared,
     cwd,
     buildDir,
     codegenDir,
@@ -1204,6 +1221,7 @@ export function formatConfig(cfg: Config, exe: string): string {
   // Non-default modes — show so you notice when a build is unusual.
   if (cfg.webkit !== "prebuilt") features.push(`webkit:${cfg.webkit}`);
   if (cfg.simdutfNamespace !== undefined) features.push(`simdutf:${cfg.simdutfNamespace}`);
+  if (cfg.embedderShared) features.push("embedder:shared");
   if (cfg.mode !== "full") features.push(`mode:${cfg.mode}`);
   // Version pin overrides — show a short hash so you catch "forgot to
   // revert my WebKit test branch" before the build goes weird.
