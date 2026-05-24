@@ -670,13 +670,13 @@ export const bunOnlyFlags: Flag[] = [
   },
   {
     flag: ["-fno-pic", "-fno-pie"],
-    when: c => c.unix && c.abi !== "android",
+    when: c => c.unix && c.abi !== "android" && !c.embedderShared,
     desc: "No position-independent code (we're a final executable)",
   },
   {
     flag: "-fPIC",
-    when: c => c.abi === "android",
-    desc: "Android requires PIE since API 21; bionic's loader rejects non-PIE",
+    when: c => c.abi === "android" || c.embedderShared,
+    desc: "Position-independent code for Android PIE or Nimbus shared embedder",
   },
 
   // ─── Warnings-as-errors (unix) ───
@@ -1281,7 +1281,7 @@ export const linkerFlags: Flag[] = [
   },
   {
     flag: ["-fno-pic", "-Wl,-no-pie"],
-    when: c => c.linux && c.abi !== "android",
+    when: c => c.linux && c.abi !== "android" && !c.embedderShared,
     desc: "No PIE (we don't need ASLR; simpler codegen)",
   },
   {

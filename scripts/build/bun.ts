@@ -790,6 +790,97 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
   );
 
   emitEmbedProbeSmokeTest(n, cfg, exe);
+  if (cfg.embedderShared) {
+    emitEmbedderSharedTarget(n, cfg, input);
+  }
+}
+
+function emitEmbedderSharedTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInput): void {
+  assert(cfg.linux || cfg.darwin, "shared Bun embedder is currently implemented for Linux and macOS");
+  const libName = cfg.darwin ? "libnimbus_bun_jsc_embedder.dylib" : "libnimbus_bun_jsc_embedder.so";
+  const exportList = resolve(
+    cfg.buildDir,
+    cfg.darwin ? "nimbus-bun-embedder.exports" : "nimbus-bun-embedder.version-script",
+  );
+  writeIfChanged(exportList, sharedEmbedderExportList(cfg));
+
+  const shared = link(
+    n,
+    cfg,
+    libName,
+    [...input.allObjects, ...input.rustObjects, ...input.windowsRes],
+    {
+      libs: input.depLibs,
+      flags: sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
+      implicitInputs: [...input.implicitInputs, exportList],
+    },
+  );
+
+  writeIfChanged(resolve(cfg.buildDir, "nimbus-bun-embed-shared-library.txt"), `${shared}\n`);
+  n.phony("bun-embed-shared", [shared]);
+  n.phony("check-bun-embed-shared", [shared]);
+}
+
+function sharedEmbedderExportList(cfg: Config): string {
+  if (cfg.darwin) {
+    return [
+      "_nimbus_bun_embed_probe_construct_and_destroy_vm",
+      "_nimbus_bun_embed_probe_sync_host_call",
+      "_nimbus_bun_embed_probe_async_host_call",
+      "_nimbus_bun_embed_probe_program_bundle_host_calls",
+      "_nimbus_bun_embed_probe_timeout_and_cancel",
+      "_nimbus_bun_embed_probe_permission_surface_inventory",
+      "_nimbus_bun_embed_probe_memory_behavior",
+      "_nimbus_bun_embed_probe_package_module_policy",
+      "_nimbus_bun_embed_probe_lifecycle_reuse_stress",
+      "_nimbus_bun_embed_invoke_program_wrapper_json",
+      "",
+    ].join("\n");
+  }
+
+  return [
+    "NIMBUS_BUN_JSC_EMBEDDER_1.0 {",
+    "  global:",
+    "    nimbus_bun_embed_probe_construct_and_destroy_vm;",
+    "    nimbus_bun_embed_probe_sync_host_call;",
+    "    nimbus_bun_embed_probe_async_host_call;",
+    "    nimbus_bun_embed_probe_program_bundle_host_calls;",
+    "    nimbus_bun_embed_probe_timeout_and_cancel;",
+    "    nimbus_bun_embed_probe_permission_surface_inventory;",
+    "    nimbus_bun_embed_probe_memory_behavior;",
+    "    nimbus_bun_embed_probe_package_module_policy;",
+    "    nimbus_bun_embed_probe_lifecycle_reuse_stress;",
+    "    nimbus_bun_embed_invoke_program_wrapper_json;",
+    "  local:",
+    "    *;",
+    "};",
+    "",
+  ].join("\n");
+}
+
+function sharedEmbedderLinkFlags(cfg: Config, ldflags: string[], exportList: string, libName: string): string[] {
+  const flags = ldflags.filter(flag => {
+    if (flag === "-fno-pic" || flag === "-Wl,-no-pie" || flag === "-pie" || flag === "-rdynamic") return false;
+    if (flag === "-Wl,-z,lazy" || flag === "-Wl,-z,norelro") return false;
+    if (flag.startsWith("-Wl,--dynamic-list=")) return false;
+    if (flag.startsWith("-Wl,--version-script=")) return false;
+    if (flag.startsWith("-Wl,-Map=")) return false;
+    return true;
+  });
+
+  if (cfg.darwin) {
+    flags.push("-dynamiclib", "-Wl,-dead_strip", `-Wl,-exported_symbols_list,${exportList}`);
+  } else {
+    flags.push(
+      "-shared",
+      `-Wl,-soname,${libName}`,
+      `-Wl,--version-script=${exportList}`,
+      "-Wl,-z,relro",
+      "-Wl,-z,now",
+    );
+  }
+
+  return flags;
 }
 
 function emitEmbedProbeSmokeTest(n: Ninja, cfg: Config, exe: string): void {
