@@ -168,6 +168,7 @@ export interface Config {
 
   // ─── Dependency modes ───
   webkit: WebKitMode;
+  simdutfNamespace: string | undefined;
 
   // ─── Paths (all absolute) ───
   /** Repository root. */
@@ -349,6 +350,7 @@ export interface PartialConfig {
   ci?: boolean;
   buildkite?: boolean;
   webkit?: WebKitMode;
+  simdutfNamespace?: string;
   buildDir?: string;
   cacheDir?: string;
   /** Override NDK location (default: $ANDROID_NDK_ROOT etc). Only used when abi=android. */
@@ -1036,6 +1038,25 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const nodejsAbiVersion = partial.nodejsAbiVersion ?? versionDefaults.nodejsAbiVersion;
   const nodejsV8Version = partial.nodejsV8Version ?? versionDefaults.nodejsV8Version;
   const webkitVersion = partial.webkitVersion ?? versionDefaults.webkitVersion;
+  const webkit = partial.webkit ?? "prebuilt";
+  const simdutfNamespace = partial.simdutfNamespace;
+  if (simdutfNamespace !== undefined) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(simdutfNamespace)) {
+      throw new BuildError("--simdutf-namespace must be a valid C++ identifier", {
+        hint: "Use a namespace such as nimbus_bun_simdutf.",
+      });
+    }
+    if (simdutfNamespace !== "nimbus_bun_simdutf") {
+      throw new BuildError("--simdutf-namespace currently supports only nimbus_bun_simdutf", {
+        hint: "The Bun simdutf C wrapper ABI is prefixed to nimbus_bun_simdutf__* for the Nimbus linked-adapter proof.",
+      });
+    }
+    if (webkit !== "local") {
+      throw new BuildError("--simdutf-namespace requires --webkit=local", {
+        hint: "Prebuilt WebKit archives already contain public simdutf symbols; use a local WebKit source build so the namespace is applied to WebKit and Bun together.",
+      });
+    }
+  }
 
   // ─── macOS SDK ───
   // Must be passed to nested cmake builds or they'll pick the wrong SDK.
@@ -1143,7 +1164,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     timeTrace: partial.timeTrace ?? false,
     ci,
     buildkite,
-    webkit: partial.webkit ?? "prebuilt",
+    webkit,
+    simdutfNamespace,
     cwd,
     buildDir,
     codegenDir,
@@ -1468,6 +1490,7 @@ export function formatConfig(cfg: Config, exe: string): string {
   if (!cfg.canary) features.push("canary:off");
   // Non-default modes — show so you notice when a build is unusual.
   if (cfg.webkit !== "prebuilt") features.push(`webkit:${cfg.webkit}`);
+  if (cfg.simdutfNamespace !== undefined) features.push(`simdutf:${cfg.simdutfNamespace}`);
   if (cfg.mode !== "full") features.push(`mode:${cfg.mode}`);
   // Version pin overrides — show a short hash so you catch "forgot to
   // revert my WebKit test branch" before the build goes weird.

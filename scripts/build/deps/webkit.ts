@@ -288,6 +288,9 @@ export const webkit: Dependency = {
       const inc = join(cfg.sysroot, "usr", "include");
       cxxOptFlagStr += ` -nostdlibinc -isystem ${join(inc, "c++", "v1")} -isystem ${inc}`;
     }
+    if (cfg.simdutfNamespace !== undefined) {
+      cxxOptFlagStr += ` -Dsimdutf=${cfg.simdutfNamespace}`;
+    }
     const args: Record<string, string> = {
       CMAKE_C_FLAGS: optFlagStr,
       CMAKE_CXX_FLAGS: cxxOptFlagStr,

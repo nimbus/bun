@@ -447,6 +447,7 @@ function parseArgs(argv: string[]): CliArgs {
     "nodejsVersion",
     "nodejsAbiVersion",
     "webkitVersion",
+    "simdutfNamespace",
     "pgoGenerate",
     "pgoUse",
     "androidNdk",
@@ -569,6 +570,7 @@ Options:
                           on/off/true/false/yes/no/1/0.
                           Fields: asan, lto, assertions, logs, baseline,
                                   canary, valgrind, webkit (prebuilt|local),
+                                  simdutfNamespace,
                                   buildDir, mode (full|cpp-only|link-only),
                                   unifiedSources, timeTrace, os, arch, abi,
                                   winsysroot (Windows cross-compile SDK root)
