@@ -100,6 +100,7 @@ pub extern "C" fn nimbus_bun_embed_probe_lifecycle_reuse_stress() -> i32 {
 
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
+    bun_core::StackCheck::configure_thread();
     if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
         bun_runtime::allocators::register_safety_vtables();
     }
