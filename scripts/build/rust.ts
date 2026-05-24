@@ -462,6 +462,10 @@ export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, 
     rustflags.push("-Zsanitizer=address");
     rustflags.push("--cfg=bun_asan");
   }
+  rustflags.push("--check-cfg=cfg(bun_private_simdutf_namespace)");
+  if (cfg.simdutfNamespace !== undefined) {
+    rustflags.push("--cfg=bun_private_simdutf_namespace");
+  }
   // `bun_codegen_embed`: embed codegen-output `.js` (`include_bytes!`) instead
   // of reading them from `BUN_CODEGEN_DIR` at runtime. Mirrors Zig
   // `BunBuildOptions.shouldEmbedCode() = optimize != .Debug or codegen_embed`.

@@ -48,180 +48,400 @@ impl Status {
 }
 
 unsafe extern "C" {
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__detect_encodings"
+    )]
     pub fn simdutf__detect_encodings(input: *const u8, length: usize) -> c_int;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf8"
+    )]
     pub fn simdutf__validate_utf8(buf: *const u8, len: usize) -> bool;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf8_with_errors"
+    )]
     pub fn simdutf__validate_utf8_with_errors(buf: *const u8, len: usize) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_ascii"
+    )]
     pub fn simdutf__validate_ascii(buf: *const u8, len: usize) -> bool;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_ascii_with_errors"
+    )]
     pub fn simdutf__validate_ascii_with_errors(buf: *const u8, len: usize) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf16le"
+    )]
     pub fn simdutf__validate_utf16le(buf: *const u16, len: usize) -> bool;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf16be"
+    )]
     pub fn simdutf__validate_utf16be(buf: *const u16, len: usize) -> bool;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf16le_with_errors"
+    )]
     pub fn simdutf__validate_utf16le_with_errors(buf: *const u16, len: usize) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf16be_with_errors"
+    )]
     pub fn simdutf__validate_utf16be_with_errors(buf: *const u16, len: usize) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf32"
+    )]
     pub fn simdutf__validate_utf32(buf: *const c_uint, len: usize) -> bool;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__validate_utf32_with_errors"
+    )]
     pub fn simdutf__validate_utf32_with_errors(buf: *const c_uint, len: usize) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf16le"
+    )]
     pub fn simdutf__convert_utf8_to_utf16le(
         buf: *const u8,
         len: usize,
         utf16_output: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf16be"
+    )]
     pub fn simdutf__convert_utf8_to_utf16be(
         buf: *const u8,
         len: usize,
         utf16_output: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf16le_with_errors"
+    )]
     pub fn simdutf__convert_utf8_to_utf16le_with_errors(
         buf: *const u8,
         len: usize,
         utf16_output: *mut u16,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf16be_with_errors"
+    )]
     pub fn simdutf__convert_utf8_to_utf16be_with_errors(
         buf: *const u8,
         len: usize,
         utf16_output: *mut u16,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf8_to_utf16be"
+    )]
     pub fn simdutf__convert_valid_utf8_to_utf16be(
         buf: *const u8,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf32"
+    )]
     pub fn simdutf__convert_utf8_to_utf32(
         buf: *const u8,
         len: usize,
         utf32_output: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf8_to_utf32_with_errors"
+    )]
     pub fn simdutf__convert_utf8_to_utf32_with_errors(
         buf: *const u8,
         len: usize,
         utf32_output: *mut u32,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf8_to_utf32"
+    )]
     pub fn simdutf__convert_valid_utf8_to_utf32(
         buf: *const u8,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16le_to_utf8"
+    )]
     pub fn simdutf__convert_utf16le_to_utf8(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16be_to_utf8"
+    )]
     pub fn simdutf__convert_utf16be_to_utf8(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16le_to_utf8_with_errors"
+    )]
     pub fn simdutf__convert_utf16le_to_utf8_with_errors(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16be_to_utf8_with_errors"
+    )]
     pub fn simdutf__convert_utf16be_to_utf8_with_errors(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf16le_to_utf8"
+    )]
     pub fn simdutf__convert_valid_utf16le_to_utf8(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf16be_to_utf8"
+    )]
     pub fn simdutf__convert_valid_utf16be_to_utf8(
         buf: *const u16,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf8"
+    )]
     pub fn simdutf__convert_utf32_to_utf8(
         buf: *const c_uint,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf8_with_errors"
+    )]
     pub fn simdutf__convert_utf32_to_utf8_with_errors(
         buf: *const c_uint,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf32_to_utf8"
+    )]
     pub fn simdutf__convert_valid_utf32_to_utf8(
         buf: *const c_uint,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf16le"
+    )]
     pub fn simdutf__convert_utf32_to_utf16le(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf16be"
+    )]
     pub fn simdutf__convert_utf32_to_utf16be(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf16le_with_errors"
+    )]
     pub fn simdutf__convert_utf32_to_utf16le_with_errors(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf32_to_utf16be_with_errors"
+    )]
     pub fn simdutf__convert_utf32_to_utf16be_with_errors(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf32_to_utf16le"
+    )]
     pub fn simdutf__convert_valid_utf32_to_utf16le(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf32_to_utf16be"
+    )]
     pub fn simdutf__convert_valid_utf32_to_utf16be(
         buf: *const c_uint,
         len: usize,
         utf16_buffer: *mut u16,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16le_to_utf32"
+    )]
     pub fn simdutf__convert_utf16le_to_utf32(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16be_to_utf32"
+    )]
     pub fn simdutf__convert_utf16be_to_utf32(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16le_to_utf32_with_errors"
+    )]
     pub fn simdutf__convert_utf16le_to_utf32_with_errors(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_utf16be_to_utf32_with_errors"
+    )]
     pub fn simdutf__convert_utf16be_to_utf32_with_errors(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> SIMDUTFResult;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf16le_to_utf32"
+    )]
     pub fn simdutf__convert_valid_utf16le_to_utf32(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_valid_utf16be_to_utf32"
+    )]
     pub fn simdutf__convert_valid_utf16be_to_utf32(
         buf: *const u16,
         len: usize,
         utf32_buffer: *mut u32,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__convert_latin1_to_utf8"
+    )]
     pub fn simdutf__convert_latin1_to_utf8(
         buf: *const u8,
         len: usize,
         utf8_buffer: *mut u8,
     ) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__change_endianness_utf16"
+    )]
     pub fn simdutf__change_endianness_utf16(buf: *const u16, length: usize, output: *mut u16);
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__count_utf16le"
+    )]
     pub fn simdutf__count_utf16le(buf: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__count_utf16be"
+    )]
     pub fn simdutf__count_utf16be(buf: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__count_utf8"
+    )]
     pub fn simdutf__count_utf8(buf: *const u8, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf8_length_from_utf16le"
+    )]
     pub fn simdutf__utf8_length_from_utf16le(input: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf8_length_from_utf16be"
+    )]
     pub fn simdutf__utf8_length_from_utf16be(input: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf32_length_from_utf16le"
+    )]
     pub fn simdutf__utf32_length_from_utf16le(input: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf32_length_from_utf16be"
+    )]
     pub fn simdutf__utf32_length_from_utf16be(input: *const u16, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf16_length_from_utf8"
+    )]
     pub fn simdutf__utf16_length_from_utf8(input: *const u8, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf8_length_from_utf32"
+    )]
     pub fn simdutf__utf8_length_from_utf32(input: *const c_uint, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf16_length_from_utf32"
+    )]
     pub fn simdutf__utf16_length_from_utf32(input: *const c_uint, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf32_length_from_utf8"
+    )]
     pub fn simdutf__utf32_length_from_utf8(input: *const u8, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf8_length_from_latin1"
+    )]
     pub fn simdutf__utf8_length_from_latin1(input: *const u8, length: usize) -> usize;
+    #[cfg_attr(
+        bun_private_simdutf_namespace,
+        link_name = "nimbus_bun_simdutf__utf16_length_from_latin1"
+    )]
     pub fn simdutf__utf16_length_from_latin1(input: *const u8, length: usize) -> usize;
 }
 
@@ -743,12 +963,20 @@ pub mod base64 {
     use core::ffi::c_int;
 
     unsafe extern "C" {
+        #[cfg_attr(
+            bun_private_simdutf_namespace,
+            link_name = "nimbus_bun_simdutf__base64_encode"
+        )]
         fn simdutf__base64_encode(
             input: *const u8,
             length: usize,
             output: *mut u8,
             is_urlsafe: c_int,
         ) -> usize;
+        #[cfg_attr(
+            bun_private_simdutf_namespace,
+            link_name = "nimbus_bun_simdutf__base64_decode_from_binary"
+        )]
         fn simdutf__base64_decode_from_binary(
             input: *const u8,
             length: usize,
@@ -756,6 +984,10 @@ pub mod base64 {
             outlen: usize,
             is_urlsafe: c_int,
         ) -> SIMDUTFResult;
+        #[cfg_attr(
+            bun_private_simdutf_namespace,
+            link_name = "nimbus_bun_simdutf__base64_decode_from_binary16"
+        )]
         fn simdutf__base64_decode_from_binary16(
             input: *const u16,
             length: usize,
@@ -763,6 +995,10 @@ pub mod base64 {
             outlen: usize,
             is_urlsafe: c_int,
         ) -> SIMDUTFResult;
+        #[cfg_attr(
+            bun_private_simdutf_namespace,
+            link_name = "nimbus_bun_simdutf__base64_length_from_binary"
+        )]
         fn simdutf__base64_length_from_binary(length: usize, options: c_int) -> usize;
     }
 
