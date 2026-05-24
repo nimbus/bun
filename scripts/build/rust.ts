@@ -540,6 +540,10 @@ export function cargoBuildInvocation(cfg: Config, spec: RustArchiveSpec = bunRus
   if (cfg.debug) {
     rustflags.push("--cfg=bun_debug");
   }
+  rustflags.push("--check-cfg=cfg(bun_private_simdutf_namespace)");
+  if (cfg.simdutfNamespace !== undefined) {
+    rustflags.push("--cfg=bun_private_simdutf_namespace");
+  }
   // `bun_codegen_embed`: embed codegen-output `.js` (`include_bytes!`) instead
   // of reading them from `BUN_CODEGEN_DIR` at runtime. Mirrors Zig
   // `BunBuildOptions.shouldEmbedCode() = optimize != .Debug or codegen_embed`.

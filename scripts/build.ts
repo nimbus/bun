@@ -465,6 +465,7 @@ function parseArgs(argv: string[]): CliArgs {
     "nodejsVersion",
     "nodejsAbiVersion",
     "webkitVersion",
+    "simdutfNamespace",
     "pgoGenerate",
     "pgoUse",
     "androidNdk",
@@ -591,6 +592,7 @@ Options:
                                   canary, valgrind, webkit (prebuilt|local),
                                   local-deps (name=path[,name=path] — build a
                                   vendored dep from a local checkout),
+                                  simdutfNamespace,
                                   buildDir, mode (full|cpp-only|link-only),
                                   unifiedSources, timeTrace, os, arch, abi,
                                   winsysroot (Windows cross-compile SDK root)
