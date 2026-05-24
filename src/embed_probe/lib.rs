@@ -6,12 +6,13 @@
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
-use std::{slice, str, sync::Arc, thread};
+use std::{cell::Cell, ffi::c_void, slice, str, sync::Arc, thread};
 
+use bun_core::ZigString;
 use bun_jsc::virtual_machine::{InitOptions, VirtualMachine};
 use bun_jsc::{
     AnyPromise, CallFrame, GlobalRef, JSFunction, JSGlobalObject, JSPromise, JSValue, JsResult,
-    PromiseStatus, VM,
+    PromiseStatus, VM, ZigStringJsc as _,
 };
 
 // Force-link the shared C ABI bridge that still owns process-neutral symbols
@@ -29,7 +30,305 @@ static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut(
 static SAFETY_VTABLES_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SPIN_ENTERED_ACK: AtomicBool = AtomicBool::new(false);
 
+pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
+    context: *mut c_void,
+    request_ptr: *const u8,
+    request_len: usize,
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+) -> i32;
+
+#[derive(Clone, Copy)]
+struct HostBridgeInvocation {
+    context: *mut c_void,
+    call_json: NimbusBunEmbedHostCallJsonFn,
+}
+
+thread_local! {
+    static CURRENT_HOST_BRIDGE_INVOCATION: Cell<Option<HostBridgeInvocation>> = const { Cell::new(None) };
+}
+
+struct HostBridgeInvocationGuard {
+    previous: Option<HostBridgeInvocation>,
+}
+
+impl HostBridgeInvocationGuard {
+    fn install(context: *mut c_void, call_json: NimbusBunEmbedHostCallJsonFn) -> Self {
+        let previous = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(HostBridgeInvocation { context, call_json }));
+            previous
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for HostBridgeInvocationGuard {
+    fn drop(&mut self) {
+        CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| slot.set(self.previous));
+    }
+}
+
 const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
+
+const NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE: &[u8] = br#"
+const __nimbusHostOperationNames = Object.freeze({
+  op_nimbus_http_route: "http_route",
+  op_nimbus_ctx_query: "ctx_query",
+  op_nimbus_ctx_paginated_query: "ctx_paginated_query",
+  op_nimbus_ctx_mutation: "ctx_mutation",
+  op_nimbus_ctx_action: "ctx_action",
+  op_nimbus_ctx_run_query: "ctx_run_query",
+  op_nimbus_ctx_run_mutation: "ctx_run_mutation",
+  op_nimbus_ctx_run_action: "ctx_run_action",
+  op_nimbus_document_get: "document_get",
+  op_nimbus_ctx_query_start: "query_builder_start",
+  op_nimbus_ctx_query_with_index: "query_builder_with_index",
+  op_nimbus_ctx_query_filter: "query_builder_filter",
+  op_nimbus_ctx_query_order: "query_builder_order",
+  op_nimbus_ctx_query_collect: "query_read_collect",
+  op_nimbus_ctx_query_take: "query_read_take",
+  op_nimbus_ctx_query_paginate: "query_read_paginate",
+  op_nimbus_ctx_query_first: "query_read_first",
+  op_nimbus_ctx_query_unique: "query_read_unique",
+  op_nimbus_document_insert: "document_insert",
+  op_nimbus_document_patch: "document_patch",
+  op_nimbus_document_delete: "document_delete",
+  op_nimbus_ctx_scheduler_run_after: "ctx_scheduler_run_after",
+  op_nimbus_ctx_scheduler_run_at: "ctx_scheduler_run_at",
+  op_nimbus_ctx_scheduler_cancel: "ctx_scheduler_cancel",
+  op_nimbus_ctx_service_lookup: "ctx_service_lookup",
+  op_nimbus_ctx_runtime_enter_nested_call: "ctx_runtime_enter_nested_call",
+  op_nimbus_runtime_extension_call: "runtime_extension_call",
+});
+
+function __nimbusFormatHostError(error) {
+  if (error === null || error === undefined) {
+    return "unknown host error";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch (_error) {
+    return String(error);
+  }
+}
+
+function __nimbusNormalizeHostOperationName(opName) {
+  const operation = __nimbusHostOperationNames[opName];
+  if (typeof operation !== "string") {
+    throw new Error(`Nimbus Bun/JSC host op not found: ${opName}`);
+  }
+  return operation;
+}
+
+function __nimbusCallHostBridge(opName, payload) {
+  const request = {
+    abi_version: 1,
+    operation: __nimbusNormalizeHostOperationName(opName),
+    payload: payload ?? null,
+  };
+  const responseText = globalThis.__nimbusHostBridgeCallJson(JSON.stringify(request));
+  const response = JSON.parse(responseText);
+  if (!response || response.status !== "ok") {
+    const error = new Error(
+      `Nimbus Bun/JSC host call failed for ${opName}: ${__nimbusFormatHostError(response?.error)}`,
+    );
+    error.nimbusHostError = response?.error ?? null;
+    throw error;
+  }
+  return response.value;
+}
+
+function __nimbusNormalizeFunctionReference(functionRef, label) {
+  if (!functionRef || typeof functionRef !== "object") {
+    throw new Error(`ctx.${label}(...) requires a generated function reference`);
+  }
+  if (typeof functionRef.name !== "string" || functionRef.name.length === 0) {
+    throw new Error(`ctx.${label}(...) requires a named generated function reference`);
+  }
+  return {
+    name: functionRef.name,
+    visibility: typeof functionRef.visibility === "string" ? functionRef.visibility : "public",
+  };
+}
+
+function __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId) {
+  return Object.freeze({
+    __builderId: builderId,
+    withIndex(indexName, builderFn) {
+      syncHostValue("op_nimbus_ctx_query_with_index", {
+        builder_id: builderId,
+        index_name: indexName,
+        filters: typeof builderFn === "function" ? [] : [],
+      });
+      return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
+    },
+    filter() {
+      syncHostValue("op_nimbus_ctx_query_filter", {
+        builder_id: builderId,
+        filters: [],
+      });
+      return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
+    },
+    order(direction) {
+      syncHostValue("op_nimbus_ctx_query_order", {
+        builder_id: builderId,
+        direction,
+      });
+      return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
+    },
+    collect() {
+      return asyncHostValue("op_nimbus_ctx_query_collect", { builder_id: builderId });
+    },
+    take(limit) {
+      return asyncHostValue("op_nimbus_ctx_query_take", { builder_id: builderId, limit });
+    },
+    paginate(options = {}) {
+      return asyncHostValue("op_nimbus_ctx_query_paginate", {
+        builder_id: builderId,
+        page_size: options.numItems,
+        cursor: typeof options.cursor === "string" ? options.cursor : null,
+      });
+    },
+    first() {
+      return asyncHostValue("op_nimbus_ctx_query_first", { builder_id: builderId });
+    },
+    unique() {
+      return asyncHostValue("op_nimbus_ctx_query_unique", { builder_id: builderId });
+    },
+  });
+}
+
+let __nimbusNextSessionId = 1;
+
+globalThis.__nimbusSyncHostValue = function(opName, payload) {
+  return __nimbusCallHostBridge(opName, payload);
+};
+
+globalThis.__nimbusAsyncHostValue = async function(opName, payload) {
+  return __nimbusCallHostBridge(opName, payload);
+};
+
+globalThis.__nimbusCreateContext = function(options = {}) {
+  const sessionId =
+    typeof options.sessionId === "string" && options.sessionId.length > 0
+      ? options.sessionId
+      : `session-${__nimbusNextSessionId++}`;
+  const requestAuth =
+    options.request !== null &&
+    typeof options.request === "object" &&
+    options.request.auth !== null &&
+    typeof options.request.auth === "object"
+      ? options.request.auth
+      : null;
+  const services =
+    options.request !== null &&
+    typeof options.request === "object" &&
+    options.request.services !== null &&
+    typeof options.request.services === "object"
+      ? options.request.services
+      : null;
+  const withSession = (payload) => ({
+    session_id: sessionId,
+    ...(payload ?? {}),
+  });
+  const syncHostValue = (opName, payload) => globalThis.__nimbusSyncHostValue(opName, withSession(payload));
+  const asyncHostValue = (opName, payload) => globalThis.__nimbusAsyncHostValue(opName, withSession(payload));
+  const runFunction = (opName, kind, label, functionRef, args = {}) => {
+    const normalized = __nimbusNormalizeFunctionReference(functionRef, label);
+    return asyncHostValue(opName, {
+      ...normalized,
+      args,
+      ...(requestAuth ? { auth: requestAuth } : {}),
+    });
+  };
+  return {
+    db: {
+      get(tableOrId, maybeId) {
+        if (maybeId === undefined) {
+          if (
+            tableOrId &&
+            typeof tableOrId === "object" &&
+            typeof tableOrId.table === "string" &&
+            typeof tableOrId.id === "string"
+          ) {
+            return asyncHostValue("op_nimbus_document_get", {
+              table: tableOrId.table,
+              id: tableOrId.id,
+            });
+          }
+          throw new Error("Nimbus Bun/JSC ctx.db.get requires table and id");
+        }
+        return asyncHostValue("op_nimbus_document_get", {
+          table: tableOrId,
+          id: maybeId,
+        });
+      },
+      query(table) {
+        const builderId = syncHostValue("op_nimbus_ctx_query_start", { table });
+        return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
+      },
+      insert(table, fields) {
+        return asyncHostValue("op_nimbus_document_insert", { table, fields });
+      },
+      patch(table, id, patch) {
+        return asyncHostValue("op_nimbus_document_patch", { table, id, patch });
+      },
+      delete(table, id) {
+        return asyncHostValue("op_nimbus_document_delete", { table, id });
+      },
+    },
+    scheduler: {
+      runAfter(delayMs, functionRef, args = {}) {
+        const normalized = __nimbusNormalizeFunctionReference(functionRef, "scheduler.runAfter");
+        return asyncHostValue("op_nimbus_ctx_scheduler_run_after", {
+          delay_ms: delayMs,
+          ...normalized,
+          args,
+        });
+      },
+      runAt(timestampMs, functionRef, args = {}) {
+        const normalized = __nimbusNormalizeFunctionReference(functionRef, "scheduler.runAt");
+        return asyncHostValue("op_nimbus_ctx_scheduler_run_at", {
+          timestamp_ms: timestampMs,
+          ...normalized,
+          args,
+        });
+      },
+      cancel(jobId) {
+        return asyncHostValue("op_nimbus_ctx_scheduler_cancel", { job_id: jobId });
+      },
+    },
+    services: Object.freeze({
+      get(serviceName) {
+        if (services && Object.prototype.hasOwnProperty.call(services, serviceName)) {
+          return services[serviceName];
+        }
+        return asyncHostValue("op_nimbus_ctx_service_lookup", { service_name: serviceName });
+      },
+    }),
+    runQuery(functionRef, args = {}) {
+      return runFunction("op_nimbus_ctx_run_query", "query", "runQuery", functionRef, args);
+    },
+    runMutation(functionRef, args = {}) {
+      return runFunction("op_nimbus_ctx_run_mutation", "mutation", "runMutation", functionRef, args);
+    },
+    runAction(functionRef, args = {}) {
+      return runFunction("op_nimbus_ctx_run_action", "action", "runAction", functionRef, args);
+    },
+  };
+};
+
+Object.freeze(globalThis.__nimbusHostBridgeCallJson);
+Object.freeze(globalThis.__nimbusSyncHostValue);
+Object.freeze(globalThis.__nimbusAsyncHostValue);
+Object.freeze(globalThis.__nimbusCreateContext);
+1
+"#;
 
 unsafe extern "C" {
     safe fn JSC__VM__getAPILock(vm: &VM);
@@ -125,6 +424,54 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
     };
 
     construct_vm_and_run(|vm| {
+        run_program_wrapper_json_invocation(
+            vm,
+            bundle_source,
+            request_json,
+            output_ptr,
+            output_cap,
+            output_len,
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
+    bundle_ptr: *const u8,
+    bundle_len: usize,
+    request_ptr: *const u8,
+    request_len: usize,
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+    host_context: *mut c_void,
+    host_call_json: Option<NimbusBunEmbedHostCallJsonFn>,
+) -> i32 {
+    if bundle_ptr.is_null()
+        || request_ptr.is_null()
+        || output_ptr.is_null()
+        || output_len.is_null()
+        || host_context.is_null()
+    {
+        return 300;
+    }
+    let Some(host_call_json) = host_call_json else {
+        return 308;
+    };
+
+    // SAFETY: pointer validity is the caller's ABI contract. The slices are
+    // consumed synchronously before the function returns and are never stored.
+    let bundle_source = unsafe { slice::from_raw_parts(bundle_ptr, bundle_len) };
+    // SAFETY: pointer validity is the caller's ABI contract. The slices are
+    // consumed synchronously before the function returns and are never stored.
+    let request_bytes = unsafe { slice::from_raw_parts(request_ptr, request_len) };
+    let request_json = match str::from_utf8(request_bytes) {
+        Ok(request_json) => request_json,
+        Err(_) => return 301,
+    };
+
+    construct_vm_and_run(|vm| {
+        let _host_bridge_guard = HostBridgeInvocationGuard::install(host_context, host_call_json);
         run_program_wrapper_json_invocation(
             vm,
             bundle_source,
@@ -564,6 +911,12 @@ fn run_program_wrapper_json_invocation(
         );
     }
 
+    if current_host_bridge_invocation_installed() {
+        if let Err(status) = install_host_bridge_transport(global) {
+            return status;
+        }
+    }
+
     if let Err(status) = evaluate_program(
         global,
         bundle_source,
@@ -624,6 +977,36 @@ fn run_program_wrapper_json_invocation(
         core::ptr::copy_nonoverlapping(response.as_ptr(), output_ptr, response.len());
     }
     0
+}
+
+fn current_host_bridge_invocation_installed() -> bool {
+    CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| slot.get().is_some())
+}
+
+fn install_host_bridge_transport(global: &JSGlobalObject) -> Result<(), i32> {
+    global.to_js_value().put(
+        global,
+        b"__nimbusHostBridgeCallJson",
+        JSFunction::create(
+            global,
+            "__nimbusHostBridgeCallJson",
+            __jsc_host_nimbus_bun_embed_host_bridge_call_json,
+            1,
+            Default::default(),
+        ),
+    );
+
+    let result = evaluate_program(
+        global,
+        NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE,
+        b"nimbus-bun-linked-adapter-host-bridge-transport.js",
+        309,
+    )?;
+    if result.is_number() && result.as_number() as i32 == 1 {
+        Ok(())
+    } else {
+        Err(310)
+    }
 }
 
 fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
@@ -2293,6 +2676,75 @@ impl Drop for ProbeApiLock {
         // probe and the guard is dropped before VM teardown.
         JSC__VM__releaseAPILock(unsafe { &*self.vm });
     }
+}
+
+#[bun_jsc::host_fn]
+pub fn nimbus_bun_embed_host_bridge_call_json(
+    global: &JSGlobalObject,
+    frame: &CallFrame,
+) -> JsResult<JSValue> {
+    let request = frame.argument(0);
+    if !request.is_string() {
+        return Ok(host_bridge_response_json_to_js(
+            global,
+            br#"{"status":"error","error":{"code":"invalid_host_bridge_request","message":"request must be a JSON string"}}"#,
+        ));
+    }
+
+    let request = bun_core::OwnedString::new(request.to_bun_string(global)?);
+    let request = request.to_utf8();
+    let request = request.slice();
+    let mut output = vec![0_u8; NIMBUS_HOST_BRIDGE_OUTPUT_CAP];
+    let mut output_len = 0_usize;
+
+    let status = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
+        let Some(invocation) = slot.get() else {
+            return 311;
+        };
+        // SAFETY: Nimbus installs the callback only for the duration of one
+        // synchronous VM invocation. Pointers are borrowed for this call and
+        // the callback must copy any response before returning.
+        unsafe {
+            (invocation.call_json)(
+                invocation.context,
+                request.as_ptr(),
+                request.len(),
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        }
+    });
+
+    if status != 0 {
+        return Ok(host_bridge_response_json_to_js(
+            global,
+            host_bridge_status_error_response(status).as_bytes(),
+        ));
+    }
+    if output_len > output.len() {
+        return Ok(host_bridge_response_json_to_js(
+            global,
+            br#"{"status":"error","error":{"code":"host_bridge_response_too_large","message":"host bridge response exceeded the ABI output buffer"}}"#,
+        ));
+    }
+
+    Ok(host_bridge_response_json_to_js(
+        global,
+        &output[..output_len],
+    ))
+}
+
+const NIMBUS_HOST_BRIDGE_OUTPUT_CAP: usize = 4 * 1024 * 1024;
+
+fn host_bridge_response_json_to_js(global: &JSGlobalObject, response: &[u8]) -> JSValue {
+    ZigString::from_bytes(response).to_js(global)
+}
+
+fn host_bridge_status_error_response(status: i32) -> String {
+    format!(
+        r#"{{"status":"error","error":{{"code":"host_bridge_callback_failed","status":{status}}}}}"#
+    )
 }
 
 #[bun_jsc::host_fn]
