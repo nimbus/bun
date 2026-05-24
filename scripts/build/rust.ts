@@ -434,7 +434,13 @@ export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, 
   // dylibs / build scripts), so those still build PIC. Darwin (Mach-O is
   // always PIC), Android (bionic loader requires PIE — flags.ts:934), and
   // Windows (COFF has its own model) are excluded.
-  if ((cfg.linux && cfg.abi !== "android") || cfg.freebsd) {
+  //
+  // The Nimbus embedder-shared lane is the opposite product shape: Rust feeds
+  // a shared object, so absolute ET_EXEC relocations are rejected by lld.
+  // Force PIC there even on Linux/FreeBSD.
+  if (cfg.embedderShared) {
+    rustflags.push("-Crelocation-model=pic");
+  } else if ((cfg.linux && cfg.abi !== "android") || cfg.freebsd) {
     rustflags.push("-Crelocation-model=static");
   }
   // Keep frame pointers — matches the C++ side's `-fno-omit-frame-pointer` / `/Oy-`
