@@ -857,14 +857,24 @@ function sharedEmbedderExportList(cfg: Config): string {
 }
 
 function sharedEmbedderLinkFlags(cfg: Config, ldflags: string[], exportList: string, libName: string): string[] {
-  const flags = ldflags.filter(flag => {
-    if (flag === "-fno-pic" || flag === "-Wl,-no-pie" || flag === "-pie" || flag === "-rdynamic") return false;
-    if (flag === "-Wl,-z,lazy" || flag === "-Wl,-z,norelro") return false;
-    if (flag.startsWith("-Wl,--dynamic-list=")) return false;
-    if (flag.startsWith("-Wl,--version-script=")) return false;
-    if (flag.startsWith("-Wl,-Map=")) return false;
-    return true;
-  });
+  const flags: string[] = [];
+  for (let i = 0; i < ldflags.length; i++) {
+    const flag = ldflags[i]!;
+    if (flag === "-fno-pic" || flag === "-Wl,-no-pie" || flag === "-pie" || flag === "-rdynamic") continue;
+    if (flag === "-Wl,-z,lazy" || flag === "-Wl,-z,norelro") continue;
+    if (cfg.darwin && flag.startsWith("-Wl,-stack_size")) continue;
+    // Drop Bun's executable export list before adding the Nimbus-only ABI list.
+    if (cfg.darwin && flag === "-exported_symbols_list") {
+      i += 1;
+      continue;
+    }
+    if (cfg.darwin && flag.startsWith("-Wl,-exported_symbols_list")) continue;
+    if (flag.startsWith("-Wl,--dynamic-list=")) continue;
+    if (flag.startsWith("-Wl,--version-script=")) continue;
+    if (flag.startsWith("-Wl,-Map=")) continue;
+    if (flag.startsWith("-Wl,-map,")) continue;
+    flags.push(flag);
+  }
 
   if (cfg.darwin) {
     flags.push("-dynamiclib", "-Wl,-dead_strip", `-Wl,-exported_symbols_list,${exportList}`);
