@@ -3836,6 +3836,21 @@ JSC::JSPromise* GlobalObject::moduleLoaderImportModule(JSGlobalObject* jsGlobalO
     VM& vm = JSC::getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
+    // Embedder deny gate runs before EVERY dynamic-import path out of this
+    // function — including the NodeVM early return below — so an embedder
+    // module-resolution policy cannot be bypassed via node:vm contexts.
+    {
+        auto moduleNamePolicy = moduleNameValue->value(globalObject);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+        auto moduleNamePolicyString = Bun::toStringRef(moduleNamePolicy);
+        if (Bun__embedderShouldDenyModuleResolution(globalObject, &moduleNamePolicyString, BunEmbedderModuleResolutionKindDynamicImport)) {
+            moduleNamePolicyString.deref();
+            throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+            return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
+        }
+        moduleNamePolicyString.deref();
+    }
+
     {
         JSC::JSPromise* result = NodeVM::importModule(globalObject, moduleNameValue, parameters, sourceOrigin);
         RETURN_IF_EXCEPTION(scope, nullptr);
@@ -3849,15 +3864,6 @@ JSC::JSPromise* GlobalObject::moduleLoaderImportModule(JSGlobalObject* jsGlobalO
     // Not `auto` (GCOwnedDataScope): importModule below can drive moduleLoaderFetch synchronously; see that function for why no scope may be live.
     WTF::String moduleName = moduleNameValue->value(globalObject);
     RETURN_IF_EXCEPTION(scope, nullptr);
-    {
-        auto moduleNamePolicyString = Bun::toStringRef(moduleName);
-        if (Bun__embedderShouldDenyModuleResolution(globalObject, &moduleNamePolicyString, BunEmbedderModuleResolutionKindDynamicImport)) {
-            moduleNamePolicyString.deref();
-            throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
-            return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
-        }
-        moduleNamePolicyString.deref();
-    }
 
     auto sourceURL = sourceOrigin.url();
     String sourceOriginStringHolder;
