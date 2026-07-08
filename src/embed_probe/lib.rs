@@ -1701,6 +1701,30 @@ import("nimbus-plugin:probe").then(
         Err(status) => return status,
     };
 
+    // node:vm is the module that would let guest code build a
+    // NodeVMGlobalObject (whose module loader is a distinct hook from the
+    // main global's). Prove it is unreachable to untrusted guests: dynamic
+    // import of it is denied by the same embedder gate. This keeps the
+    // NodeVMGlobalObject deny gate (defense-in-depth) anchored to a proven
+    // guest-facing property — the vm module cannot be obtained here.
+    let node_vm_module_status = match evaluate_dynamic_import_status(
+        vm,
+        global,
+        br#"
+import("node:vm").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
+"#,
+        b"nimbus-bun-embed-probe-dynamic-import-node-vm.js",
+        247,
+        248,
+        249,
+    ) {
+        Ok(status) => status,
+        Err(status) => return status,
+    };
+
     let (
         require_status,
         bun_resolve_status,
@@ -1871,6 +1895,9 @@ typeof globalThis.Bun === "undefined"
     if plugin_virtual_module_status != 8 {
         return 243;
     }
+    if node_vm_module_status != 8 {
+        return 247;
+    }
     if bun_resolve_status != 8 || bun_resolve_sync_status != 8 {
         return 244;
     }
@@ -1896,6 +1923,10 @@ typeof globalThis.Bun === "undefined"
     eprintln!(
         "  plugin_virtual_module_import: {}",
         module_policy_status_name(plugin_virtual_module_status)
+    );
+    eprintln!(
+        "  node_vm_module_import: {}",
+        module_policy_status_name(node_vm_module_status)
     );
     eprintln!("  require: {}", module_policy_status_name(require_status));
     eprintln!(
