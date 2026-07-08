@@ -762,11 +762,16 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
     orderOnlyInputs: input.codegenOrderOnly,
   });
 
+  // Same ELF cross-language LTO fix-up as the main bun link (identity on
+  // darwin/windows or when LTO is off) — the probe exe and the shared
+  // embedder must not feed raw archive bitcode to the linker either.
+  const rustLinkInputs = rustLtoLinkInputs(n, cfg, input.rustObjects, "bun_embed_probe.lto.o");
+
   writeIfChanged(
     resolve(cfg.buildDir, "nimbus-bun-embed-link-args.txt"),
     [
       ...input.allObjects,
-      ...input.rustObjects,
+      ...rustLinkInputs,
       ...input.windowsRes,
       ...input.depLibs,
       ...input.ldflags,
@@ -777,7 +782,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
     n,
     cfg,
     "bun-embed-probe",
-    [driverObject, ...input.allObjects, ...input.rustObjects, ...input.windowsRes],
+    [driverObject, ...input.allObjects, ...rustLinkInputs, ...input.windowsRes],
     {
       libs: input.depLibs,
       flags: input.ldflags,
@@ -787,7 +792,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
 
   emitEmbedProbeSmokeTest(n, cfg, exe);
   if (cfg.embedderShared) {
-    emitEmbedderSharedTarget(n, cfg, input);
+    emitEmbedderSharedTarget(n, cfg, { ...input, rustObjects: rustLinkInputs });
   }
 }
 

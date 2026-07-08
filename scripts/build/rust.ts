@@ -965,7 +965,7 @@ export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, 
  * supplies its native members (compiler_builtins). On every other config
  * this is the identity function.
  */
-export function rustLtoLinkInputs(n: Ninja, cfg: Config, rustObjects: string[]): string[] {
+export function rustLtoLinkInputs(n: Ninja, cfg: Config, rustObjects: string[], outName = "bun_rust.lto.o"): string[] {
   const rustLib = rustObjects[0];
   if (!cfg.crossLangLto || cfg.darwin || cfg.windows || rustLib === undefined) return rustObjects;
   assert(
@@ -974,7 +974,7 @@ export function rustLtoLinkInputs(n: Ninja, cfg: Config, rustObjects: string[]):
     { hint: "Install the pinned rust toolchain (rustup show active-toolchain), or build with --lto=off" },
   );
   const llvmBin = join(cfg.rustSysroot, "lib", "rustlib", cfg.host.rustTriple, "bin");
-  const out = resolve(cfg.buildDir, "bun_rust.lto.o");
+  const out = resolve(cfg.buildDir, outName);
   n.build({
     outputs: [out],
     rule: "rust_lto_fix",
