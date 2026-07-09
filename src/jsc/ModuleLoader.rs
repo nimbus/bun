@@ -5,9 +5,9 @@
 //! `bun_transpiler` internals / gated bundler types (forward-dep cycle on
 //! `bun_jsc`).
 
+use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use bun_alloc::Arena as ArenaAllocator;
 use bun_options_types::LoaderExt as _;
@@ -35,7 +35,16 @@ pub struct ModuleLoader {
 
 pub static IS_ALLOWED_TO_USE_INTERNAL_TESTING_APIS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
-static EMBEDDER_DENY_ALL_MODULE_RESOLUTION: AtomicBool = AtomicBool::new(false);
+// Per-thread, NOT process-wide. Bun runs one JSC VM per thread; the guard that
+// sets this flag and the module-resolution check that reads it both run
+// synchronously on that VM's JS thread. As a process-wide AtomicBool, one VM's
+// guard drop could re-enable module resolution while another VM (on another
+// thread) was still mid-evaluation — a cross-tenant deny-gate race. Keying the
+// flag to the thread confines it to the one VM. node:vm child contexts share
+// their parent VM's thread, so they are covered too (no per-global leak).
+thread_local! {
+    static EMBEDDER_DENY_ALL_MODULE_RESOLUTION: Cell<bool> = const { Cell::new(false) };
+}
 
 #[inline]
 pub(crate) fn set_is_allowed_to_use_internal_testing_apis(v: bool) {
@@ -69,7 +78,7 @@ impl EmbedderModuleResolutionKind {
 
 #[inline]
 pub fn set_embedder_deny_all_module_resolution_for_testing(deny: bool) {
-    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.store(deny, Ordering::SeqCst);
+    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.set(deny));
 }
 
 #[inline]
@@ -78,7 +87,7 @@ pub fn embedder_should_deny_module_resolution(
     _specifier: &bun_core::String,
     _kind: EmbedderModuleResolutionKind,
 ) -> bool {
-    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.load(Ordering::SeqCst)
+    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get())
 }
 
 #[unsafe(no_mangle)]
@@ -102,6 +111,59 @@ pub extern "C" fn Bun__embedderShouldDenyModuleResolution(
         unsafe { specifier.as_ref() },
         kind,
     )
+}
+
+#[cfg(test)]
+mod embedder_deny_thread_isolation_tests {
+    use super::EMBEDDER_DENY_ALL_MODULE_RESOLUTION;
+    use super::set_embedder_deny_all_module_resolution_for_testing;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    // The embedder deny flag gates module resolution and both its setter (the
+    // per-invocation guard) and its reader (the resolution check) run on the
+    // VM's own JS thread. This asserts the flag is confined to that thread: two
+    // threads holding OPPOSITE values concurrently must each read back their
+    // own. On the previous process-wide `AtomicBool` both threads shared one
+    // cell, so after the barrier they would read the same last-written value
+    // (`a_denies == b_denies`) and one assertion would fail — the cross-tenant
+    // deny-gate race. With the thread-local cell each thread is isolated.
+    #[test]
+    fn deny_flag_is_thread_local_not_process_wide() {
+        let barrier = Arc::new(Barrier::new(2));
+
+        let a_barrier = barrier.clone();
+        let thread_a = thread::spawn(move || {
+            set_embedder_deny_all_module_resolution_for_testing(true);
+            a_barrier.wait(); // both threads have set their opposite values
+            let seen = EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get());
+            a_barrier.wait(); // hold both flags live until each has read
+            seen
+        });
+
+        let b_barrier = barrier.clone();
+        let thread_b = thread::spawn(move || {
+            set_embedder_deny_all_module_resolution_for_testing(false);
+            b_barrier.wait();
+            let seen = EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get());
+            b_barrier.wait();
+            seen
+        });
+
+        let a_denies = thread_a.join().expect("thread A joins");
+        let b_denies = thread_b.join().expect("thread B joins");
+
+        assert!(a_denies, "thread A must read its own deny=true");
+        assert!(
+            !b_denies,
+            "thread B must read its own deny=false, not thread A's true"
+        );
+        // Neither spawned thread perturbed this (the test) thread's own cell.
+        assert!(
+            !EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get()),
+            "the flag on an untouched thread stays false"
+        );
+    }
 }
 
 impl ModuleLoader {
