@@ -972,7 +972,9 @@ globalThis.__nimbusAsyncHostCall(41).then((value) => {
 
     {
         let _lock = ProbeApiLock::new(vm.jsc_vm());
-        vm.wait_for_promise(AnyPromise::Normal(promise));
+        if vm.wait_for_promise(AnyPromise::Normal(promise)).is_err() {
+            return 17;
+        }
 
         if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 1 {
             return 15;
@@ -1148,7 +1150,12 @@ globalThis.__nimbusGeneratedProgramPromise
 
     {
         let _lock = ProbeApiLock::new(vm.jsc_vm());
-        vm.wait_for_promise(AnyPromise::Normal(async_invocation_promise));
+        if vm
+            .wait_for_promise(AnyPromise::Normal(async_invocation_promise))
+            .is_err()
+        {
+            return 38;
+        }
 
         if ASYNC_TASK_RUN_COUNT.load(Ordering::SeqCst) != 1 {
             return 32;
@@ -1318,7 +1325,9 @@ fn run_program_wrapper_json_invocation_inner(
 
     let result = match result.as_promise() {
         Some(promise) => {
-            vm.wait_for_promise(AnyPromise::Normal(promise));
+            if vm.wait_for_promise(AnyPromise::Normal(promise)).is_err() {
+                return 304;
+            }
             let promise = JSPromise::opaque_mut(promise);
             if promise.status() != PromiseStatus::Fulfilled {
                 return 304;
@@ -1463,6 +1472,34 @@ struct PermissionSurfaceProbe {
     source: &'static [u8],
 }
 
+macro_rules! denied_bun_surface {
+    ($property:literal) => {
+        PermissionSurfaceProbe {
+            name: concat!("Bun.", $property),
+            source: concat!(
+                "globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.",
+                $property,
+                ")"
+            )
+            .as_bytes(),
+        }
+    };
+}
+
+macro_rules! denied_global_surface {
+    ($property:literal) => {
+        PermissionSurfaceProbe {
+            name: $property,
+            source: concat!(
+                "globalThis.__nimbusPermissionProbeFunction(globalThis.",
+                $property,
+                ")"
+            )
+            .as_bytes(),
+        }
+    };
+}
+
 const PERMISSION_SURFACE_PROBES: &[PermissionSurfaceProbe] = &[
     PermissionSurfaceProbe {
         name: "Bun global",
@@ -1472,38 +1509,58 @@ typeof globalThis.Bun === "undefined"
   : (globalThis.Bun.__nimbusNativePermissionProfile === "deny" ? 3 : 5)
 "#,
     },
-    PermissionSurfaceProbe {
-        name: "Bun.file",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.file)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.write",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.write)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.spawn",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.spawn)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.spawnSync",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.spawnSync)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.serve",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.serve)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.listen",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.listen)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.connect",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.connect)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Bun.plugin",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Bun?.plugin)"#,
-    },
+    denied_bun_surface!("$"),
+    denied_bun_surface!("Archive"),
+    denied_bun_surface!("FileSystemRouter"),
+    denied_bun_surface!("Glob"),
+    denied_bun_surface!("Image"),
+    denied_bun_surface!("RedisClient"),
+    denied_bun_surface!("S3Client"),
+    denied_bun_surface!("SQL"),
+    denied_bun_surface!("Terminal"),
+    denied_bun_surface!("WebView"),
+    denied_bun_surface!("allocUnsafe"),
+    denied_bun_surface!("argv"),
+    denied_bun_surface!("build"),
+    denied_bun_surface!("connect"),
+    denied_bun_surface!("cron"),
+    denied_bun_surface!("cwd"),
+    denied_bun_surface!("dns"),
+    denied_bun_surface!("embeddedFiles"),
+    denied_bun_surface!("enableANSIColors"),
+    denied_bun_surface!("fetch"),
+    denied_bun_surface!("file"),
+    denied_bun_surface!("gc"),
+    denied_bun_surface!("generateHeapSnapshot"),
+    denied_bun_surface!("isStandaloneExecutable"),
+    denied_bun_surface!("jest"),
+    denied_bun_surface!("listen"),
+    denied_bun_surface!("main"),
+    denied_bun_surface!("mmap"),
+    denied_bun_surface!("openInEditor"),
+    denied_bun_surface!("origin"),
+    denied_bun_surface!("plugin"),
+    denied_bun_surface!("postgres"),
+    denied_bun_surface!("redis"),
+    denied_bun_surface!("registerMacro"),
+    denied_bun_surface!("resolve"),
+    denied_bun_surface!("resolveSync"),
+    denied_bun_surface!("s3"),
+    denied_bun_surface!("secrets"),
+    denied_bun_surface!("serve"),
+    denied_bun_surface!("shrink"),
+    denied_bun_surface!("sleep"),
+    denied_bun_surface!("sleepSync"),
+    denied_bun_surface!("spawn"),
+    denied_bun_surface!("spawnSync"),
+    denied_bun_surface!("sql"),
+    denied_bun_surface!("stderr"),
+    denied_bun_surface!("stdin"),
+    denied_bun_surface!("stdout"),
+    denied_bun_surface!("udpSocket"),
+    denied_bun_surface!("unsafe"),
+    denied_bun_surface!("which"),
+    denied_bun_surface!("write"),
     PermissionSurfaceProbe {
         name: "Bun.FFI",
         source: br#"globalThis.__nimbusPermissionProbeProfileObject(globalThis.Bun?.FFI)"#,
@@ -1519,6 +1576,30 @@ typeof globalThis.Bun === "undefined"
     PermissionSurfaceProbe {
         name: "Bun.env",
         source: br#"typeof globalThis.Bun?.env === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Bun property coverage",
+        source: br#"
+(() => {
+  const allowed = new Set([
+    "ArrayBufferSink", "Cookie", "CookieMap", "CryptoHasher", "CSRF", "FFI",
+    "JSON5", "JSONC", "JSONL", "MD4", "MD5", "SHA1", "SHA224", "SHA256",
+    "SHA384", "SHA512", "SHA512_256", "TOML", "Transpiler", "XML", "YAML",
+    "__nimbusNativePermissionProfile", "color", "concatArrayBuffers", "deepEquals",
+    "deepMatch", "deflateSync", "env", "escapeHTML", "fileURLToPath", "gunzipSync",
+    "gzipSync", "hash", "indexOfLine", "inflateSync", "inspect", "isMainThread",
+    "markdown", "nanoseconds", "password", "pathToFileURL", "peek", "randomUUIDv5",
+    "randomUUIDv7", "readableStreamToArray", "readableStreamToArrayBuffer",
+    "readableStreamToBlob", "readableStreamToBytes", "readableStreamToFormData",
+    "readableStreamToJSON", "readableStreamToText", "revision", "semver", "sha",
+    "sliceAnsi", "stringWidth", "stripANSI", "version", "version_with_sha", "wrapAnsi",
+    "zstdCompress", "zstdCompressSync", "zstdDecompress", "zstdDecompressSync",
+  ]);
+  return Object.getOwnPropertyNames(globalThis.Bun).every((name) =>
+    allowed.has(name) || globalThis.Bun[name]?.__nimbusDeniedNativeCapability === true
+  ) ? 3 : 5;
+})()
+"#,
     },
     PermissionSurfaceProbe {
         name: "process",
@@ -1572,22 +1653,16 @@ typeof globalThis.process === "undefined"
         name: "native addon via require",
         source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
     },
-    PermissionSurfaceProbe {
-        name: "fetch",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.fetch)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "WebSocket",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.WebSocket)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "setTimeout",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.setTimeout)"#,
-    },
-    PermissionSurfaceProbe {
-        name: "Worker",
-        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.Worker)"#,
-    },
+    denied_global_surface!("BroadcastChannel"),
+    denied_global_surface!("EventSource"),
+    denied_global_surface!("SharedWorker"),
+    denied_global_surface!("WebSocket"),
+    denied_global_surface!("WebSocketStream"),
+    denied_global_surface!("Worker"),
+    denied_global_surface!("fetch"),
+    denied_global_surface!("setImmediate"),
+    denied_global_surface!("setInterval"),
+    denied_global_surface!("setTimeout"),
     PermissionSurfaceProbe {
         name: "new Function",
         source: br#"globalThis.__nimbusPermissionProbeDynamicCode(() => new Function("return 1"))"#,
@@ -1902,7 +1977,12 @@ globalThis.__nimbusMemoryProbe()
 
     {
         let _lock = ProbeApiLock::new(vm.jsc_vm());
-        vm.wait_for_promise(AnyPromise::Normal(invocation_promise));
+        if vm
+            .wait_for_promise(AnyPromise::Normal(invocation_promise))
+            .is_err()
+        {
+            return 185;
+        }
 
         let promise = JSPromise::opaque_mut(invocation_promise);
         if promise.status() != PromiseStatus::Fulfilled {
@@ -2393,7 +2473,9 @@ fn evaluate_number_or_promise(
     let _lock = ProbeApiLock::new(vm.jsc_vm());
     let mut result = evaluate_program(global, source, filename, exception_status)?;
     if let Some(promise) = result.as_promise() {
-        vm.wait_for_promise(AnyPromise::Normal(promise));
+        if vm.wait_for_promise(AnyPromise::Normal(promise)).is_err() {
+            return Err(promise_rejected_status);
+        }
 
         let promise = JSPromise::opaque_mut(promise);
         if promise.status() != PromiseStatus::Fulfilled {
@@ -2669,7 +2751,9 @@ globalThis.__nimbusInvoke({{
     let Some(promise) = result.as_promise() else {
         return Err(status_base + 1);
     };
-    vm.wait_for_promise(AnyPromise::Normal(promise));
+    if vm.wait_for_promise(AnyPromise::Normal(promise)).is_err() {
+        return Err(status_base + 2);
+    }
 
     let promise = JSPromise::opaque_mut(promise);
     if promise.status() != PromiseStatus::Fulfilled {
@@ -2786,7 +2870,7 @@ fn evaluate_generated_spin_with_deadline_timeout(
     let result = spin_evaluation.and_then(|evaluation| {
         if let SpinEvaluation::Promise(promise) = evaluation {
             let _lock = ProbeApiLock::new(vm.jsc_vm());
-            vm.wait_for_promise(AnyPromise::Normal(promise));
+            let _stopped_by_deadline = vm.wait_for_promise(AnyPromise::Normal(promise)).is_err();
             if !vm.jsc_vm().has_termination_request() && !global.has_exception() {
                 return Err(45);
             }
@@ -2857,7 +2941,8 @@ fn evaluate_generated_spin_with_external_cancel(
     let result = spin_evaluation.and_then(|evaluation| {
         if let SpinEvaluation::Promise(promise) = evaluation {
             let _lock = ProbeApiLock::new(vm.jsc_vm());
-            vm.wait_for_promise(AnyPromise::Normal(promise));
+            let _stopped_by_cancellation =
+                vm.wait_for_promise(AnyPromise::Normal(promise)).is_err();
             if !vm.jsc_vm().has_termination_request() && !global.has_exception() {
                 return Err(54);
             }

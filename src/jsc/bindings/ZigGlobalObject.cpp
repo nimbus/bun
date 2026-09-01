@@ -1063,22 +1063,64 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
     RETURN_IF_EXCEPTION(scope, false);
     putEmbedderPermissionProfileMarker(vm, globalObject, bunObject);
     RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "file"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "write"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "spawn"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "spawnSync"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "serve"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "listen"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "connect"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedFunction(vm, globalObject, bunObject, "plugin"_s);
-    RETURN_IF_EXCEPTION(scope, false);
+    static constexpr ASCIILiteral deniedBunCapabilities[] = {
+        "$"_s,
+        "Archive"_s,
+        "FileSystemRouter"_s,
+        "Glob"_s,
+        "Image"_s,
+        "RedisClient"_s,
+        "S3Client"_s,
+        "SQL"_s,
+        "Terminal"_s,
+        "WebView"_s,
+        "allocUnsafe"_s,
+        "argv"_s,
+        "build"_s,
+        "connect"_s,
+        "cron"_s,
+        "cwd"_s,
+        "dns"_s,
+        "embeddedFiles"_s,
+        "enableANSIColors"_s,
+        "fetch"_s,
+        "file"_s,
+        "gc"_s,
+        "generateHeapSnapshot"_s,
+        "isStandaloneExecutable"_s,
+        "jest"_s,
+        "listen"_s,
+        "main"_s,
+        "mmap"_s,
+        "openInEditor"_s,
+        "origin"_s,
+        "plugin"_s,
+        "postgres"_s,
+        "redis"_s,
+        "registerMacro"_s,
+        "resolve"_s,
+        "resolveSync"_s,
+        "s3"_s,
+        "secrets"_s,
+        "serve"_s,
+        "shrink"_s,
+        "sleep"_s,
+        "sleepSync"_s,
+        "spawn"_s,
+        "spawnSync"_s,
+        "sql"_s,
+        "stderr"_s,
+        "stdin"_s,
+        "stdout"_s,
+        "udpSocket"_s,
+        "unsafe"_s,
+        "which"_s,
+        "write"_s,
+    };
+    for (auto name : deniedBunCapabilities) {
+        putEmbedderDeniedFunction(vm, globalObject, bunObject, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
 
     auto* ffiObject = JSC::constructEmptyObject(globalObject);
     RETURN_IF_EXCEPTION(scope, false);
@@ -1113,14 +1155,22 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, "process"_s, processObject);
     RETURN_IF_EXCEPTION(scope, false);
 
-    putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "fetch"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "WebSocket"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "setTimeout"_s);
-    RETURN_IF_EXCEPTION(scope, false);
-    putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "Worker"_s);
-    RETURN_IF_EXCEPTION(scope, false);
+    static constexpr ASCIILiteral deniedGlobalCapabilities[] = {
+        "BroadcastChannel"_s,
+        "EventSource"_s,
+        "SharedWorker"_s,
+        "WebSocket"_s,
+        "WebSocketStream"_s,
+        "Worker"_s,
+        "fetch"_s,
+        "setImmediate"_s,
+        "setInterval"_s,
+        "setTimeout"_s,
+    };
+    for (auto name : deniedGlobalCapabilities) {
+        putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
     return true;
 }
 
