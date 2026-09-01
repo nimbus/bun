@@ -686,6 +686,7 @@ dependencies = [
  "bun_jsc",
  "bun_link_bridge",
  "bun_runtime",
+ "bun_sha_hmac",
 ]
 
 [[package]]
