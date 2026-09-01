@@ -77,8 +77,8 @@ impl EmbedderModuleResolutionKind {
 }
 
 #[inline]
-pub fn set_embedder_deny_all_module_resolution_for_testing(deny: bool) {
-    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.set(deny));
+pub fn set_embedder_deny_all_module_resolution(deny: bool) -> bool {
+    EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.replace(deny))
 }
 
 #[inline]
@@ -96,14 +96,17 @@ pub extern "C" fn Bun__embedderShouldDenyModuleResolution(
     specifier: *const bun_core::String,
     kind: u8,
 ) -> bool {
-    let Some(kind) = EmbedderModuleResolutionKind::from_u8(kind) else {
+    if !EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get()) {
         return false;
+    }
+    let Some(kind) = EmbedderModuleResolutionKind::from_u8(kind) else {
+        return true;
     };
     let (Some(global_object), Some(specifier)) = (
         core::ptr::NonNull::new(global_object),
         core::ptr::NonNull::new(specifier as *mut bun_core::String),
     ) else {
-        return false;
+        return true;
     };
     embedder_should_deny_module_resolution(
         JSGlobalObject::opaque_ref(global_object.as_ptr()),
@@ -115,8 +118,10 @@ pub extern "C" fn Bun__embedderShouldDenyModuleResolution(
 
 #[cfg(test)]
 mod embedder_deny_thread_isolation_tests {
-    use super::set_embedder_deny_all_module_resolution_for_testing;
-    use super::{EMBEDDER_DENY_ALL_MODULE_RESOLUTION, EmbedderModuleResolutionKind};
+    use super::{
+        Bun__embedderShouldDenyModuleResolution, EMBEDDER_DENY_ALL_MODULE_RESOLUTION,
+        EmbedderModuleResolutionKind, set_embedder_deny_all_module_resolution,
+    };
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -134,7 +139,7 @@ mod embedder_deny_thread_isolation_tests {
 
         let a_barrier = barrier.clone();
         let thread_a = thread::spawn(move || {
-            set_embedder_deny_all_module_resolution_for_testing(true);
+            set_embedder_deny_all_module_resolution(true);
             a_barrier.wait(); // both threads have set their opposite values
             let seen = EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get());
             a_barrier.wait(); // hold both flags live until each has read
@@ -143,7 +148,7 @@ mod embedder_deny_thread_isolation_tests {
 
         let b_barrier = barrier.clone();
         let thread_b = thread::spawn(move || {
-            set_embedder_deny_all_module_resolution_for_testing(false);
+            set_embedder_deny_all_module_resolution(false);
             b_barrier.wait();
             let seen = EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get());
             b_barrier.wait();
@@ -193,6 +198,24 @@ mod embedder_deny_thread_isolation_tests {
         );
         assert_eq!(EmbedderModuleResolutionKind::from_u8(0), None);
         assert_eq!(EmbedderModuleResolutionKind::from_u8(7), None);
+    }
+
+    #[test]
+    fn deny_state_is_nestable_and_malformed_ffi_input_fails_closed() {
+        assert!(!set_embedder_deny_all_module_resolution(true));
+        assert!(set_embedder_deny_all_module_resolution(true));
+        assert!(Bun__embedderShouldDenyModuleResolution(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            0,
+        ));
+
+        assert!(set_embedder_deny_all_module_resolution(false));
+        assert!(!Bun__embedderShouldDenyModuleResolution(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            0,
+        ));
     }
 }
 

@@ -478,7 +478,7 @@ unsafe extern "C" {
         exception: *mut JSValue,
     ) -> JSValue;
 
-    fn Bun__embedderApplyNativePermissionDenyProfileForTesting(global_object: *mut JSGlobalObject);
+    fn Bun__embedderApplyNativePermissionDenyProfile(global_object: *mut JSGlobalObject) -> bool;
 }
 
 #[unsafe(no_mangle)]
@@ -734,42 +734,47 @@ impl InvocationCancellationWatcher {
         jsc_vm: &VM,
         context: *mut c_void,
         is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
-    ) -> Option<Self> {
-        let is_cancelled = is_cancelled?;
+    ) -> Result<Option<Self>, ()> {
+        let Some(is_cancelled) = is_cancelled else {
+            return Ok(None);
+        };
         let completed = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
         let completed_for_thread = Arc::clone(&completed);
         let cancelled_for_thread = Arc::clone(&cancelled);
         let context = context as usize;
         let jsc_vm = core::ptr::from_ref(jsc_vm) as usize;
-        let worker = thread::spawn(move || {
-            bun_core::StackCheck::configure_thread();
-            while !completed_for_thread.load(Ordering::SeqCst) {
-                // SAFETY: the invocation owns the callback context until this
-                // watcher is joined before VM teardown.
-                if unsafe { is_cancelled(context as *mut c_void) } {
-                    cancelled_for_thread.store(true, Ordering::SeqCst);
-                    // SAFETY: the invocation joins this watcher before it can
-                    // tear down the VM referenced by this stable pointer.
-                    unsafe { &*(jsc_vm as *const VM) }.notify_need_termination();
-                    return;
+        let worker = thread::Builder::new()
+            .name("nimbus-bun-cancellation".to_owned())
+            .spawn(move || {
+                bun_core::StackCheck::configure_thread();
+                while !completed_for_thread.load(Ordering::SeqCst) {
+                    // SAFETY: the invocation owns the callback context until this
+                    // watcher is joined before VM teardown.
+                    if unsafe { is_cancelled(context as *mut c_void) } {
+                        cancelled_for_thread.store(true, Ordering::SeqCst);
+                        // SAFETY: the invocation joins this watcher before it can
+                        // tear down the VM referenced by this stable pointer.
+                        unsafe { &*(jsc_vm as *const VM) }.notify_need_termination();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(1));
                 }
-                thread::sleep(Duration::from_millis(1));
-            }
-        });
-        Some(Self {
+            })
+            .map_err(|_| ())?;
+        Ok(Some(Self {
             completed,
             cancelled,
             worker: Some(worker),
-        })
+        }))
     }
 
-    fn finish(mut self) -> bool {
+    fn finish(mut self) -> Result<bool, ()> {
         self.completed.store(true, Ordering::SeqCst);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            worker.join().map_err(|_| ())?;
         }
-        self.cancelled.load(Ordering::SeqCst)
+        Ok(self.cancelled.load(Ordering::SeqCst))
     }
 }
 
@@ -827,18 +832,21 @@ fn construct_vm_and_run_with_init_gate(
     }
 }
 
-struct EmbedderResolutionDenyGuard;
+struct EmbedderResolutionDenyGuard {
+    previous: bool,
+}
 
 impl EmbedderResolutionDenyGuard {
     fn new() -> Self {
-        bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution_for_testing(true);
-        Self
+        Self {
+            previous: bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution(true),
+        }
     }
 }
 
 impl Drop for EmbedderResolutionDenyGuard {
     fn drop(&mut self) {
-        bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution_for_testing(false);
+        bun_jsc::ModuleLoader::set_embedder_deny_all_module_resolution(self.previous);
     }
 }
 
@@ -1209,8 +1217,18 @@ fn run_program_wrapper_json_invocation(
     cancellation_context: *mut c_void,
     is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
+    if is_cancelled.is_some() {
+        let _lock = ProbeApiLock::new(vm.jsc_vm());
+        // Cross-thread termination needs the sentinel to exist before the
+        // watcher can request a trap on this VM.
+        let _ = vm.jsc_vm().termination_exception();
+    }
     let cancellation =
-        InvocationCancellationWatcher::start(vm.jsc_vm(), cancellation_context, is_cancelled);
+        match InvocationCancellationWatcher::start(vm.jsc_vm(), cancellation_context, is_cancelled)
+        {
+            Ok(cancellation) => cancellation,
+            Err(()) => return 316,
+        };
     let status = run_program_wrapper_json_invocation_inner(
         vm,
         bundle_source,
@@ -1219,7 +1237,17 @@ fn run_program_wrapper_json_invocation(
         output_cap,
         output_len,
     );
-    if cancellation.is_some_and(InvocationCancellationWatcher::finish) {
+    let cancelled = match cancellation {
+        Some(cancellation) => match cancellation.finish() {
+            Ok(cancelled) => cancelled,
+            Err(()) => {
+                vm.global().clear_termination_exception();
+                return 316;
+            }
+        },
+        None => false,
+    };
+    if cancelled {
         vm.global().clear_termination_exception();
         314
     } else {
@@ -1244,10 +1272,15 @@ fn run_program_wrapper_json_invocation_inner(
     // SAFETY: this fresh embedder VM is single-threaded under the JSC API lock.
     // The native helper mutates only the current global object's permission
     // profile before tenant code is evaluated.
-    unsafe {
-        Bun__embedderApplyNativePermissionDenyProfileForTesting(
+    if bun_jsc::call_false_is_throw(global, || unsafe {
+        Bun__embedderApplyNativePermissionDenyProfile(
             global as *const JSGlobalObject as *mut JSGlobalObject,
-        );
+        )
+    })
+    .is_err()
+    {
+        global.clear_exception();
+        return 315;
     }
 
     if current_host_bridge_invocation_installed() {
@@ -1634,10 +1667,15 @@ globalThis.__nimbusCreateContext = () => ({});
 
     // SAFETY: this proof VM is single-threaded under the JSC API lock. The
     // native helper only mutates the current global object's embedder profile.
-    unsafe {
-        Bun__embedderApplyNativePermissionDenyProfileForTesting(
+    if bun_jsc::call_false_is_throw(global, || unsafe {
+        Bun__embedderApplyNativePermissionDenyProfile(
             global as *const JSGlobalObject as *mut JSGlobalObject,
-        );
+        )
+    })
+    .is_err()
+    {
+        global.clear_exception();
+        return 105;
     }
 
     let helper_loaded = match evaluate_program(

@@ -1049,7 +1049,7 @@ static void putEmbedderDeniedGlobalFunction(JSC::VM& vm, JSC::JSGlobalObject* gl
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, name, function);
 }
 
-extern "C" void Bun__embedderApplyNativePermissionDenyProfileForTesting(JSC::JSGlobalObject* globalObject)
+extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -1060,45 +1060,68 @@ extern "C" void Bun__embedderApplyNativePermissionDenyProfileForTesting(JSC::JSG
     if (bunObject->hasNonReifiedStaticProperties()) [[likely]] {
         bunObject->reifyAllStaticProperties(globalObject);
     }
-    RETURN_IF_EXCEPTION(scope, );
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderPermissionProfileMarker(vm, globalObject, bunObject);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "file"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "write"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "spawn"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "spawnSync"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "serve"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "listen"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "connect"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, bunObject, "plugin"_s);
+    RETURN_IF_EXCEPTION(scope, false);
 
     auto* ffiObject = JSC::constructEmptyObject(globalObject);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderPermissionProfileMarker(vm, globalObject, ffiObject);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedFunction(vm, globalObject, ffiObject, "dlopen"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     bunObject->putDirect(
         vm,
         JSC::Identifier::fromString(vm, "FFI"_s),
         ffiObject,
         PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
     bunObject->putDirect(
         vm,
         JSC::Identifier::fromString(vm, "env"_s),
         JSC::jsUndefined(),
         PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
 
     auto* processObject = JSC::constructEmptyObject(globalObject);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderPermissionProfileMarker(vm, globalObject, processObject);
+    RETURN_IF_EXCEPTION(scope, false);
     processObject->putDirect(
         vm,
         JSC::Identifier::fromString(vm, "env"_s),
         JSC::jsUndefined(),
         PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
 
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, "process"_s, processObject);
+    RETURN_IF_EXCEPTION(scope, false);
 
     putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "fetch"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "WebSocket"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "setTimeout"_s);
+    RETURN_IF_EXCEPTION(scope, false);
     putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, "Worker"_s);
+    RETURN_IF_EXCEPTION(scope, false);
+    return true;
 }
 
 const JSC::GlobalObjectMethodTable& GlobalObject::globalObjectMethodTable()
