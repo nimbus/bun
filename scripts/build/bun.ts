@@ -483,6 +483,11 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   n.comment("─── Link ───");
   n.blank();
 
+  const embedProbeVendorDeps = [lolhtml, rustArgon2].map(dep => {
+    const resolved = depsByName.get(dep.name);
+    assert(resolved !== undefined, `${dep.name} must be resolved before the embed-probe Rust archive`);
+    return resolved;
+  });
   const embedProbeRustObjects = emitRustArchive(
     n,
     cfg,
@@ -490,7 +495,7 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
       codegenInputs: codegen.rustInputs,
       codegenOrderOnly: codegen.rustOrderOnly,
       rustSources: sources.rust,
-      vendorStamps: depsByName.get("lolhtml")?.outputs ?? [],
+      vendorStamps: embedProbeVendorDeps.flatMap(dep => dep.outputs),
     },
     {
       packageName: "bun_embed_probe",
