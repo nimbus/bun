@@ -10,7 +10,7 @@ use std::{
     cell::Cell,
     ffi::c_void,
     slice, str,
-    sync::{Arc, Once},
+    sync::{Arc, Barrier, Once},
     thread,
 };
 
@@ -354,7 +354,27 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nimbus_bun_embed_probe_construct_and_destroy_vm() -> i32 {
-    construct_vm_and_run(|_| 0)
+    const CONCURRENT_FIRST_VMS: usize = 4;
+
+    let barrier = Arc::new(Barrier::new(CONCURRENT_FIRST_VMS));
+    let workers = (0..CONCURRENT_FIRST_VMS)
+        .map(|_| {
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                construct_vm_and_run(|_| 0)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for worker in workers {
+        match worker.join() {
+            Ok(0) => {}
+            Ok(status) => return status,
+            Err(_) => return 319,
+        }
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
