@@ -1500,6 +1500,20 @@ macro_rules! denied_global_surface {
     };
 }
 
+macro_rules! denied_console_surface {
+    ($property:literal) => {
+        PermissionSurfaceProbe {
+            name: concat!("console.", $property),
+            source: concat!(
+                "globalThis.__nimbusPermissionProbeFunction(globalThis.console?.",
+                $property,
+                ")"
+            )
+            .as_bytes(),
+        }
+    };
+}
+
 const PERMISSION_SURFACE_PROBES: &[PermissionSurfaceProbe] = &[
     PermissionSurfaceProbe {
         name: "Bun global",
@@ -1613,6 +1627,13 @@ typeof globalThis.process === "undefined"
         name: "process.env",
         source: br#"typeof globalThis.process?.env === "undefined" ? 1 : 5"#,
     },
+    denied_console_surface!("_stderr"),
+    denied_console_surface!("_stdout"),
+    denied_console_surface!("write"),
+    PermissionSurfaceProbe {
+        name: "console[Symbol.asyncIterator]",
+        source: br#"globalThis.__nimbusPermissionProbeFunction(globalThis.console?.[Symbol.asyncIterator])"#,
+    },
     PermissionSurfaceProbe {
         name: "require",
         source: br#"typeof globalThis.require === "undefined" ? 1 : 5"#,
@@ -1659,7 +1680,13 @@ typeof globalThis.process === "undefined"
     denied_global_surface!("WebSocket"),
     denied_global_surface!("WebSocketStream"),
     denied_global_surface!("Worker"),
+    denied_global_surface!("alert"),
+    denied_global_surface!("confirm"),
     denied_global_surface!("fetch"),
+    denied_global_surface!("gc"),
+    denied_global_surface!("postMessage"),
+    denied_global_surface!("prompt"),
+    denied_global_surface!("reportError"),
     denied_global_surface!("setImmediate"),
     denied_global_surface!("setInterval"),
     denied_global_surface!("setTimeout"),

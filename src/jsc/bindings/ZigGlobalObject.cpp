@@ -992,7 +992,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEmbedderDeniedNativeCapability,
     return {};
 }
 
-static void putEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object, ASCIILiteral name)
+static JSC::JSFunction* createEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, ASCIILiteral name)
 {
     auto* function = JSC::JSFunction::create(
         vm,
@@ -1007,11 +1007,22 @@ static void putEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalOb
         JSC::Identifier::fromString(vm, "__nimbusDeniedNativeCapability"_s),
         JSC::jsBoolean(true),
         PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    return function;
+}
+
+static void putEmbedderDeniedProperty(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object, JSC::PropertyName property, ASCIILiteral functionName)
+{
+    auto* function = createEmbedderDeniedFunction(vm, globalObject, functionName);
     object->putDirect(
         vm,
-        JSC::Identifier::fromString(vm, name),
+        property,
         function,
         PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+}
+
+static void putEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object, ASCIILiteral name)
+{
+    putEmbedderDeniedProperty(vm, globalObject, object, JSC::Identifier::fromString(vm, name), name);
 }
 
 static void putEmbedderPermissionProfileMarker(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object)
@@ -1033,19 +1044,7 @@ static void putEmbedderGlobalProfileValue(JSC::VM& vm, JSC::JSGlobalObject* glob
 
 static void putEmbedderDeniedGlobalFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* globalThis, ASCIILiteral name)
 {
-    auto* function = JSC::JSFunction::create(
-        vm,
-        globalObject,
-        0,
-        String(name),
-        functionEmbedderDeniedNativeCapability,
-        ImplementationVisibility::Public,
-        JSC::NoIntrinsic);
-    function->putDirect(
-        vm,
-        JSC::Identifier::fromString(vm, "__nimbusDeniedNativeCapability"_s),
-        JSC::jsBoolean(true),
-        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    auto* function = createEmbedderDeniedFunction(vm, globalObject, name);
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, name, function);
 }
 
@@ -1155,6 +1154,24 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, "process"_s, processObject);
     RETURN_IF_EXCEPTION(scope, false);
 
+    auto consoleValue = globalObject->get(globalObject, JSC::Identifier::fromString(vm, "console"_s));
+    RETURN_IF_EXCEPTION(scope, false);
+    if (!consoleValue.isObject()) {
+        return false;
+    }
+    auto* consoleObject = consoleValue.getObject();
+    static constexpr ASCIILiteral deniedConsoleCapabilities[] = {
+        "_stderr"_s,
+        "_stdout"_s,
+        "write"_s,
+    };
+    for (auto name : deniedConsoleCapabilities) {
+        putEmbedderDeniedFunction(vm, globalObject, consoleObject, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
+    putEmbedderDeniedProperty(vm, globalObject, consoleObject, vm.propertyNames->asyncIteratorSymbol, "Symbol.asyncIterator"_s);
+    RETURN_IF_EXCEPTION(scope, false);
+
     static constexpr ASCIILiteral deniedGlobalCapabilities[] = {
         "BroadcastChannel"_s,
         "EventSource"_s,
@@ -1162,7 +1179,13 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
         "WebSocket"_s,
         "WebSocketStream"_s,
         "Worker"_s,
+        "alert"_s,
+        "confirm"_s,
         "fetch"_s,
+        "gc"_s,
+        "postMessage"_s,
+        "prompt"_s,
+        "reportError"_s,
         "setImmediate"_s,
         "setInterval"_s,
         "setTimeout"_s,
