@@ -115,8 +115,8 @@ pub extern "C" fn Bun__embedderShouldDenyModuleResolution(
 
 #[cfg(test)]
 mod embedder_deny_thread_isolation_tests {
-    use super::EMBEDDER_DENY_ALL_MODULE_RESOLUTION;
     use super::set_embedder_deny_all_module_resolution_for_testing;
+    use super::{EMBEDDER_DENY_ALL_MODULE_RESOLUTION, EmbedderModuleResolutionKind};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -163,6 +163,36 @@ mod embedder_deny_thread_isolation_tests {
             !EMBEDDER_DENY_ALL_MODULE_RESOLUTION.with(|flag| flag.get()),
             "the flag on an untouched thread stays false"
         );
+    }
+
+    #[test]
+    fn resolution_kind_discriminants_match_the_c_abi() {
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(1),
+            Some(EmbedderModuleResolutionKind::DynamicImport)
+        );
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(2),
+            Some(EmbedderModuleResolutionKind::LoadAndEvaluateModule)
+        );
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(3),
+            Some(EmbedderModuleResolutionKind::BunResolve)
+        );
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(4),
+            Some(EmbedderModuleResolutionKind::BunResolveSync)
+        );
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(5),
+            Some(EmbedderModuleResolutionKind::ImportMetaResolve)
+        );
+        assert_eq!(
+            EmbedderModuleResolutionKind::from_u8(6),
+            Some(EmbedderModuleResolutionKind::RequireResolve)
+        );
+        assert_eq!(EmbedderModuleResolutionKind::from_u8(0), None);
+        assert_eq!(EmbedderModuleResolutionKind::from_u8(7), None);
     }
 }
 

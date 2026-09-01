@@ -20,11 +20,11 @@ const manifest = {
         "table": "messages",
         "fields": {
           "body": {
-            "$arg": "body"
-          }
-        }
+            "$arg": "body",
+          },
+        },
       },
-      "runtime_handler": null
+      "runtime_handler": null,
     },
     {
       "name": "messages:sendAndSchedule",
@@ -41,14 +41,15 @@ const manifest = {
       "node_version": null,
       "node_runtime_target": null,
       "plan": null,
-      "runtime_handler": "async (ctx, { body }) => {\n    const id = await ctx.db.insert(\"messages\", { body });\n    await ctx.scheduler.runAfter(\n      1_000,\n      internalScheduledFunctions.messages.sendInternal,\n      { body: `${body} later` },\n    );\n    return id;\n  }",
+      "runtime_handler":
+        'async (ctx, { body }) => {\n    const id = await ctx.db.insert("messages", { body });\n    await ctx.scheduler.runAfter(\n      1_000,\n      internalScheduledFunctions.messages.sendInternal,\n      { body: `${body} later` },\n    );\n    return id;\n  }',
       "runtime_bindings": {
         "internalScheduledFunctions": {
           "type": "generated_reference_tree",
           "visibility": "internal",
-          "reference_kind": "mutation"
-        }
-      }
+          "reference_kind": "mutation",
+        },
+      },
     },
     {
       "name": "messages:spinForever",
@@ -70,63 +71,164 @@ const manifest = {
         "internalScheduledFunctions": {
           "type": "generated_reference_tree",
           "visibility": "internal",
-          "reference_kind": "mutation"
-        }
-      }
-    }
+          "reference_kind": "mutation",
+        },
+      },
+    },
   ],
-  "routes": []
+  "routes": [],
 };
-const functionsByName = new Map(
-  manifest.functions.map((definition) => [definition.name, definition]),
-);
+
+function nimbusRemapHandlerError(error, origin) {
+  if (!origin || typeof origin.line !== "number") {
+    return error;
+  }
+  const err = error instanceof Error ? error : new Error(String(error));
+  const stack = typeof err.stack === "string" ? err.stack : "";
+  // The topmost `<anonymous>:LINE:COL` frame is the handler's throw site. The
+  // outer `eval at <anonymous> (file:...)` marker has `<anonymous> (`, not
+  // `<anonymous>:`, so this regex targets only the body frame.
+  const match = stack.match(/<anonymous>:(\d+):(\d+)/);
+  if (!match) {
+    return err;
+  }
+  const reportedLine = Number(match[1]);
+  const originalLine = origin.line + (reportedLine - 2) - 1;
+  if (!Number.isFinite(originalLine) || originalLine < 1) {
+    return err;
+  }
+  const location = (origin.module ? origin.module + ":" : "") + originalLine;
+  const suffix = " (at " + location + ")";
+  const baseMessage = String(err.message == null ? "" : err.message);
+  if (baseMessage.endsWith(suffix)) {
+    return err;
+  }
+  // Append ` (at module:line)` and throw a FRESH error. Two deno_core behaviors,
+  // both verified live against the dev runtime, dictate this exact approach:
+  // (1) deno_core derives the surfaced exception text from V8's `create_message`,
+  //     which reflects the message captured at the *original* throw — so mutating
+  //     the existing error's `.message` is ignored; a fresh error is required.
+  // (2) Do NOT copy the original error's `.stack` onto the fresh error. Doing so
+  //     re-associates it with the original's frames, and deno_core then collapses
+  //     the surfaced text back to the original message, dropping the appended
+  //     location. Letting the fresh error keep its own stack lets the location
+  //     survive into the run record.
+  const remapped = new Error(baseMessage + suffix);
+  remapped.name = err.name;
+  remapped.nimbusOriginalLocation = location;
+  return remapped;
+}
+
+function nimbusWrapRuntimeInvoke(invoke, bindingValues, ctx, args, request, origin) {
+  let result;
+  try {
+    result = invoke(...bindingValues, ctx, args, request);
+  } catch (error) {
+    throw nimbusRemapHandlerError(error, origin);
+  }
+  if (result !== null && typeof result === "object" && typeof result.then === "function") {
+    return result.then(undefined, error => {
+      throw nimbusRemapHandlerError(error, origin);
+    });
+  }
+  return result;
+}
+const functionsByName = new Map(manifest.functions.map(definition => [definition.name, definition]));
 const routesByName = new Map(
   (manifest.routes ?? [])
-    .filter((route) => typeof route.name === "string" && route.name.length > 0)
-    .map((route) => [route.name, route]),
+    .filter(route => typeof route.name === "string" && route.name.length > 0)
+    .map(route => [route.name, route]),
 );
-const runtimeHandlersByName = new Map(
-  manifest.functions
-    .filter((definition) => typeof definition.runtime_handler === "string")
-    .map((definition) => [definition.name, compileRuntimeHandler(definition)]),
-);
+// Runtime handlers are initialized lazily and memoized by name. Module bundles
+// use the Function constructor so Node bindings can resolve on first use. The
+// flat Bun/JSC program bundle instead receives codegen-emitted function-literal
+// factories and never needs string code generation in the guest process.
+const runtimeHandlersByName = new Map();
+const runtimeHandlerFactoriesByName = new Map([
+  [
+    "messages:sendAndSchedule",
+    async function (definition) {
+      const runtimeBindings = await materializeRuntimeBindings(definition.runtime_bindings);
+      const bindingValues = ["internalScheduledFunctions"].map(name => runtimeBindings[name]);
+      const invoke = (
+        internalScheduledFunctions => (ctx, args, request) =>
+          (async (ctx, { body }) => {
+            const id = await ctx.db.insert("messages", { body });
+            await ctx.scheduler.runAfter(1_000, internalScheduledFunctions.messages.sendInternal, {
+              body: `${body} later`,
+            });
+            return id;
+          })(ctx, args, request)
+      )(...bindingValues);
+      const handlerOrigin = {
+        module: typeof definition.module === "string" ? definition.module : null,
+        line: typeof definition.runtime_handler_line === "number" ? definition.runtime_handler_line : null,
+      };
+      return (ctx, args, request) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, request, handlerOrigin);
+    },
+  ],
+  [
+    "messages:spinForever",
+    async function (definition) {
+      const runtimeBindings = await materializeRuntimeBindings(definition.runtime_bindings);
+      const bindingValues = ["internalScheduledFunctions"].map(name => runtimeBindings[name]);
+      const invoke = (
+        internalScheduledFunctions => (ctx, args, request) =>
+          (async (_ctx, { body }) => {
+            body.trim();
+            while (true) {}
+          })(ctx, args, request)
+      )(...bindingValues);
+      const handlerOrigin = {
+        module: typeof definition.module === "string" ? definition.module : null,
+        line: typeof definition.runtime_handler_line === "number" ? definition.runtime_handler_line : null,
+      };
+      return (ctx, args, request) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, request, handlerOrigin);
+    },
+  ],
+]);
+
+async function getRuntimeHandler(definition) {
+  if (typeof definition.runtime_handler !== "string" || definition.runtime_handler.length === 0) {
+    return null;
+  }
+  if (!runtimeHandlersByName.has(definition.name)) {
+    const factory = runtimeHandlerFactoriesByName.get(definition.name);
+    if (typeof factory !== "function") {
+      throw new Error(`runtime program handler factory not found: ${definition.name}`);
+    }
+    runtimeHandlersByName.set(definition.name, factory(definition));
+  }
+  return await runtimeHandlersByName.get(definition.name);
+}
 
 function createRuntimeContext(request) {
   return globalThis.__nimbusCreateContext({
     request,
-    sessionId: `${request.kind}:${request.function_name}`,
+    hostCallSessionId:
+      typeof request.hostCallSessionId === "string" && request.hostCallSessionId.length > 0
+        ? request.hostCallSessionId
+        : `${request.kind}:${request.function_name}`,
+    // HG2: pass the module-private local-dispatch invoker straight through as
+    // a call argument (Convex's fresh-ctx-as-argument pattern) instead of
+    // bridging it through a guest-reachable globalThis property. guest handler
+    // bodies compile via the Function constructor (see compileRuntimeHandler
+    // below) and run in global scope, so they have no lexical access to this
+    // module's `invokeNamedDefinitionLocally` binding and cannot intercept or
+    // forge it here; only this trusted preamble code ever supplies it.
+    invokeNamedLocal: invokeNamedDefinitionLocally,
   });
 }
 
-function compileRuntimeHandler(definition) {
-  const source = definition.runtime_handler;
-  if (typeof source !== "string" || source.length === 0) {
-    return null;
-  }
-
-  const runtimeBindings = materializeRuntimeBindings(definition.runtime_bindings);
-  const bindingNames = Object.keys(runtimeBindings);
-  const bindingValues = bindingNames.map((name) => runtimeBindings[name]);
-  const invoke = new Function(
-    ...bindingNames,
-    "ctx",
-    "args",
-    "request",
-    "return (" + source + ")(ctx, args, request);",
-  );
-
-  return (ctx, args, request) => invoke(...bindingValues, ctx, args, request);
-}
-
-function materializeRuntimeBindings(bindingDescriptors) {
+async function materializeRuntimeBindings(bindingDescriptors) {
   const bindings = {};
   for (const [name, descriptor] of Object.entries(bindingDescriptors ?? {})) {
-    bindings[name] = materializeRuntimeBinding(descriptor);
+    bindings[name] = await materializeRuntimeBinding(descriptor);
   }
   return bindings;
 }
 
-function materializeRuntimeBinding(descriptor) {
+async function materializeRuntimeBinding(descriptor) {
   if (descriptor === null || typeof descriptor !== "object") {
     throw new Error("invalid runtime binding descriptor");
   }
@@ -136,37 +238,40 @@ function materializeRuntimeBinding(descriptor) {
         visibility: descriptor.visibility,
         kind: descriptor.reference_kind ?? undefined,
       });
-    case "node_builtin_default":
-      return nodeBuiltinModule(descriptor.specifier).default ?? nodeBuiltinModule(descriptor.specifier);
+    case "node_builtin_default": {
+      const module = await nodeBuiltinModule(descriptor.specifier);
+      return module.default ?? module;
+    }
     case "node_builtin_namespace":
-      return nodeBuiltinModule(descriptor.specifier);
-    case "node_builtin_named":
-      return nodeBuiltinModule(descriptor.specifier)[descriptor.imported_name];
-    case "node_external_package_default":
-      return nodeExternalPackage(descriptor.specifier).default ?? nodeExternalPackage(descriptor.specifier);
+      return await nodeBuiltinModule(descriptor.specifier);
+    case "node_builtin_named": {
+      const module = await nodeBuiltinModule(descriptor.specifier);
+      return module[descriptor.imported_name];
+    }
+    case "node_external_package_default": {
+      const module = await nodeExternalPackage(descriptor.specifier);
+      return module.default ?? module;
+    }
     case "node_external_package_namespace":
-      return nodeExternalPackage(descriptor.specifier);
-    case "node_external_package_named":
-      return nodeExternalPackage(descriptor.specifier)[descriptor.imported_name];
+      return await nodeExternalPackage(descriptor.specifier);
+    case "node_external_package_named": {
+      const module = await nodeExternalPackage(descriptor.specifier);
+      return module[descriptor.imported_name];
+    }
     default:
       throw new Error(`unsupported runtime binding descriptor: ${descriptor.type}`);
   }
 }
 
+// Dynamic import() is only reached when a function that actually uses this
+// specifier is invoked, and ES module semantics already memoize repeated
+// import() calls for the same specifier, so no separate cache is needed here.
 function nodeBuiltinModule(specifier) {
-  const module = __nimbusNodeBuiltinModules.get(specifier);
-  if (module === undefined) {
-    throw new Error(`missing generated Node.js builtin binding for ${specifier}`);
-  }
-  return module;
+  return import(specifier);
 }
 
 function nodeExternalPackage(specifier) {
-  const module = __nimbusNodeExternalPackages.get(specifier);
-  if (module === undefined) {
-    throw new Error(`missing generated Node.js external package binding for ${specifier}`);
-  }
-  return module;
+  return import(specifier);
 }
 
 function createGeneratedReferenceTree(config, pathParts = []) {
@@ -186,19 +291,14 @@ function createGeneratedReferenceTree(config, pathParts = []) {
         if (typeof property === "symbol") {
           return undefined;
         }
-        return createGeneratedReferenceTree(config, [
-          ...pathParts,
-          String(property),
-        ]);
+        return createGeneratedReferenceTree(config, [...pathParts, String(property)]);
       },
     },
   );
 }
 
 function referenceNameFromPath(pathParts) {
-  return pathParts.length > 1
-    ? `${pathParts.slice(0, -1).join(".")}:${pathParts.at(-1)}`
-    : pathParts[0];
+  return pathParts.length > 1 ? `${pathParts.slice(0, -1).join(".")}:${pathParts.at(-1)}` : pathParts[0];
 }
 
 function isPlainObject(value) {
@@ -206,15 +306,11 @@ function isPlainObject(value) {
 }
 
 function isRuntimeQueryBuilder(value) {
-  return isPlainObject(value)
-    && typeof value.__builderId === "string"
-    && value.__builderId.length > 0;
+  return isPlainObject(value) && typeof value.__builderId === "string" && value.__builderId.length > 0;
 }
 
 function isArgPlaceholder(value) {
-  return isPlainObject(value)
-    && typeof value.$arg === "string"
-    && Object.keys(value).length === 1;
+  return isPlainObject(value) && typeof value.$arg === "string" && Object.keys(value).length === 1;
 }
 
 function resolveArgsTemplate(template, args) {
@@ -222,11 +318,11 @@ function resolveArgsTemplate(template, args) {
     return template;
   }
   if (Array.isArray(template)) {
-    return template.map((item) => resolveArgsTemplate(item, args));
+    return template.map(item => resolveArgsTemplate(item, args));
   }
   if (isArgPlaceholder(template)) {
     if (!Object.prototype.hasOwnProperty.call(args, template.$arg)) {
-      throw new Error(`convex function argument missing: ${template.$arg}`);
+      throw new Error(`nimbus function argument missing: ${template.$arg}`);
     }
     return args[template.$arg];
   }
@@ -240,7 +336,7 @@ function resolveArgsTemplate(template, args) {
 
 async function executeQueryDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
-  const runtimeHandler = runtimeHandlersByName.get(definition.name);
+  const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
     return await runtimeHandler(ctx, request.args ?? {}, request);
   }
@@ -248,40 +344,38 @@ async function executeQueryDefinition(definition, request) {
   return await executeResolvedQueryPlan(ctx, plan);
 }
 
-function executePaginatedQueryDefinition(definition, request) {
-  const runtimeHandler = runtimeHandlersByName.get(definition.name);
+async function executePaginatedQueryDefinition(definition, request) {
+  const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
-    return Promise.resolve(runtimeHandler(createRuntimeContext(request), request.args ?? {}, request))
-      .then((result) => {
-        if (isRuntimeQueryBuilder(result)) {
-          if (typeof request.page_size !== "number") {
-            throw new Error("paginated runtime invocation missing page_size");
-          }
-          return globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_query_paginate", {
-            builder_id: result.__builderId,
-            page_size: request.page_size,
-            cursor: request.cursor ?? null,
-            session_id: request.kind + ":" + request.function_name,
-          });
-        }
-        return result;
+    const result = await runtimeHandler(createRuntimeContext(request), request.args ?? {}, request);
+    if (isRuntimeQueryBuilder(result)) {
+      if (typeof request.page_size !== "number") {
+        throw new Error("paginated runtime invocation missing page_size");
+      }
+      return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_query_paginate", {
+        builder_id: result.__builderId,
+        page_size: request.page_size,
+        cursor: request.cursor ?? null,
+        host_call_session_id: request.kind + ":" + request.function_name,
       });
+    }
+    return result;
   }
   const plan = resolveArgsTemplate(definition.plan, request.args ?? {});
   if (typeof request.page_size !== "number") {
     throw new Error("paginated runtime invocation missing page_size");
   }
-  return globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_paginated_query", {
+  return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_paginated_query", {
     query: plan,
     page_size: request.page_size,
     cursor: request.cursor ?? null,
-    session_id: request.kind + ":" + request.function_name,
+    host_call_session_id: request.kind + ":" + request.function_name,
   });
 }
 
 async function executeMutationDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
-  const runtimeHandler = runtimeHandlersByName.get(definition.name);
+  const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
     return await runtimeHandler(ctx, request.args ?? {}, request);
   }
@@ -291,7 +385,7 @@ async function executeMutationDefinition(definition, request) {
 
 async function executeActionDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
-  const runtimeHandler = runtimeHandlersByName.get(definition.name);
+  const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
     return await runtimeHandler(ctx, request.args ?? {}, request);
   }
@@ -300,72 +394,23 @@ async function executeActionDefinition(definition, request) {
 }
 
 function isQueryShape(plan) {
-  return isPlainObject(plan)
-    && typeof plan.table === "string"
-    && Array.isArray(plan.filters)
-    && Object.prototype.hasOwnProperty.call(plan, "order")
-    && Object.prototype.hasOwnProperty.call(plan, "limit");
+  return (
+    isPlainObject(plan) &&
+    typeof plan.table === "string" &&
+    Array.isArray(plan.filters) &&
+    Object.prototype.hasOwnProperty.call(plan, "order") &&
+    Object.prototype.hasOwnProperty.call(plan, "limit")
+  );
 }
 
-function createConstraintBuilderFromPlan(builder, filters) {
-  for (const filter of filters ?? []) {
-    const field = builder.field(filter.field);
-    switch (filter.op) {
-      case "eq":
-        builder.eq(field, filter.value);
-        break;
-      case "neq":
-        builder.neq(field, filter.value);
-        break;
-      case "gt":
-        builder.gt(field, filter.value);
-        break;
-      case "gte":
-        builder.gte(field, filter.value);
-        break;
-      case "lt":
-        builder.lt(field, filter.value);
-        break;
-      case "lte":
-        builder.lte(field, filter.value);
-        break;
-      default:
-        throw new Error(`unsupported convex filter op: ${filter.op}`);
-    }
-  }
-  return builder;
-}
-
-function buildQueryFromPlan(ctx, query) {
-  let builder = ctx.db.query(query.table);
-  if (Array.isArray(query.filters) && query.filters.length > 0) {
-    builder = builder.filter((q) => createConstraintBuilderFromPlan(q, query.filters));
-  }
-  if (query.order && typeof query.order.direction === "string") {
-    builder = builder.order(query.order.direction);
-  }
-  return builder;
-}
-
+// Compiled query plans are the same JSON the server's native dispatch
+// resolves (ConvexExecutableQuery), so they execute wholesale through the
+// direct query op. Replaying a plan through the runtime query-builder ops
+// would be lossy — the builder API cannot express index-backed ordering,
+// which a compiled plan's `order.field` carries.
 async function executeResolvedQueryPlan(ctx, plan) {
-  if (isPlainObject(plan) && plan.type === "get") {
-    return await ctx.db.get(plan.table, plan.id);
-  }
-  if (isPlainObject(plan) && plan.type === "first") {
-    return await buildQueryFromPlan(ctx, plan.query).first();
-  }
-  if (isPlainObject(plan) && plan.type === "unique") {
-    return await buildQueryFromPlan(ctx, plan.query).unique();
-  }
-  if (isQueryShape(plan)) {
-    const builder = buildQueryFromPlan(ctx, plan);
-    return typeof plan.limit === "number"
-      ? await builder.take(plan.limit)
-      : await builder.collect();
-  }
   return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_query", {
     query: plan,
-    session_id: "convex-runtime-query-plan",
   });
 }
 
@@ -412,19 +457,16 @@ async function executeResolvedMutationPlan(ctx, plan) {
   }
   return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_mutation", {
     mutation: plan,
-    session_id: "convex-runtime-mutation-plan",
   });
 }
 
 function invokeNamedDefinition(name, expectedKind, args, options = {}) {
   const definition = functionsByName.get(name);
   if (!definition) {
-    throw new Error(`convex function not found: ${name}`);
+    throw new Error(`nimbus function not found: ${name}`);
   }
   if (definition.kind !== expectedKind) {
-    throw new Error(
-      `convex function kind mismatch for ${name}: expected ${expectedKind}, got ${definition.kind}`,
-    );
+    throw new Error(`nimbus function kind mismatch for ${name}: expected ${expectedKind}, got ${definition.kind}`);
   }
 
   const request = {
@@ -433,6 +475,7 @@ function invokeNamedDefinition(name, expectedKind, args, options = {}) {
     args,
     page_size: options.pageSize,
     cursor: options.cursor ?? null,
+    hostCallSessionId: options.hostCallSessionId,
   };
 
   switch (expectedKind) {
@@ -445,40 +488,43 @@ function invokeNamedDefinition(name, expectedKind, args, options = {}) {
     case "action":
       return executeActionDefinition(definition, request);
     default:
-      throw new Error(`unsupported convex function kind: ${expectedKind}`);
+      throw new Error(`unsupported nimbus function kind: ${expectedKind}`);
   }
 }
 
 async function invokeNamedDefinitionLocally(request) {
   const definition = functionsByName.get(request.function_name);
   if (!definition) {
-    throw new Error("convex function not found: " + request.function_name);
+    throw new Error("nimbus function not found: " + request.function_name);
   }
-  const requestVisibility =
-    typeof request.visibility === "string" ? request.visibility : "public";
-  if (definition.visibility !== requestVisibility) {
+  // request.visibility is only supplied by same-isolate nested ctx.run*
+  // dispatch, where it carries the generated reference tree the caller used
+  // (api.* vs internal.*) and the host never sees the call — so the
+  // reference-selection check must run here. A host-constructed invocation
+  // (client traffic, the scheduler, or a cross-lane nested ctx.run*
+  // re-entering this bundle through host dispatch) omits it: the host has
+  // already resolved and enforced visibility against its registry, and an
+  // internal function reached that way is a trusted server-side call, not a
+  // public one.
+  if (typeof request.visibility === "string" && definition.visibility !== request.visibility) {
     throw new Error(
-      "convex function "
-        + request.function_name
-        + " is "
-        + definition.visibility
-        + ", not "
-        + requestVisibility,
+      "nimbus function " + request.function_name + " is " + definition.visibility + ", not " + request.visibility,
     );
   }
   if (definition.kind !== request.kind) {
     throw new Error(
-      "convex function kind mismatch for "
-        + request.function_name
-        + ": expected "
-        + request.kind
-        + ", got "
-        + definition.kind,
+      "nimbus function kind mismatch for " +
+        request.function_name +
+        ": expected " +
+        request.kind +
+        ", got " +
+        definition.kind,
     );
   }
   return invokeNamedDefinition(request.function_name, request.kind, request.args ?? {}, {
     pageSize: request.page_size,
     cursor: request.cursor ?? null,
+    hostCallSessionId: request.hostCallSessionId,
   });
 }
 
@@ -486,7 +532,7 @@ async function executeResolvedActionPlan(ctx, plan, request) {
   if (!isPlainObject(plan) || typeof plan.type !== "string") {
     return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_action", {
       action: plan,
-      session_id: request.kind + ":" + request.function_name,
+      host_call_session_id: request.kind + ":" + request.function_name,
     });
   }
 
@@ -498,15 +544,12 @@ async function executeResolvedActionPlan(ctx, plan, request) {
         query: plan.query.query,
         page_size: plan.query.page_size,
         cursor: plan.query.after ?? null,
-        session_id: request.kind + ":" + request.function_name,
+        host_call_session_id: request.kind + ":" + request.function_name,
       });
     case "mutation":
       return await executeResolvedMutationPlan(ctx, plan.mutation);
     case "call_query":
-      return ctx.runQuery(
-        { kind: "query", name: plan.name, visibility: plan.visibility ?? "public" },
-        plan.args ?? {},
-      );
+      return ctx.runQuery({ kind: "query", name: plan.name, visibility: plan.visibility ?? "public" }, plan.args ?? {});
     case "call_mutation":
       return ctx.runMutation(
         { kind: "mutation", name: plan.name, visibility: plan.visibility ?? "public" },
@@ -524,38 +567,61 @@ async function executeResolvedActionPlan(ctx, plan, request) {
     default:
       return await globalThis.__nimbusAsyncHostValue("op_nimbus_ctx_action", {
         action: plan,
-        session_id: request.kind + ":" + request.function_name,
+        host_call_session_id: request.kind + ":" + request.function_name,
       });
   }
 }
 
-globalThis.__nimbusInvoke = async function (request) {
-  try {
-    const definition = functionsByName.get(request.function_name);
-    if (definition) {
-      return { status: "ok", value: await invokeNamedDefinitionLocally(request) };
-    }
+// HG0 (Band B-FIX, CAPTURE-ORDERING): installed via Object.defineProperty
+// with configurable:false, writable:false rather than a plain assignment, and
+// as the FIRST statement this dispatch segment of the bundle runs — before any
+// guest handler body has a chance to execute (handler bodies initialize lazily
+// on first invocation; see runtime_bundle_preamble.mjs).
+// The host still captures this entrypoint off-graph (captured_dispatch.rs)
+// after evaluation and event-loop drain, but a guest reassignment attempt —
+// whether a direct top-level write or one queued via queueMicrotask — now
+// throws instead of silently installing an impostor for capture to observe.
+Object.defineProperty(globalThis, "__nimbusInvoke", {
+  value: async function (request) {
+    try {
+      const definition = functionsByName.get(request.function_name);
+      if (definition) {
+        return { status: "ok", value: await invokeNamedDefinitionLocally(request) };
+      }
 
-    const route = request.kind === "action"
-      ? routesByName.get(request.function_name)
-      : undefined;
-    if (route) {
-      return await globalThis.__nimbusAsyncHostValue("op_nimbus_http_route", {
-        request,
-        route,
-      });
-    }
+      const route = request.kind === "action" ? routesByName.get(request.function_name) : undefined;
+      if (route) {
+        return await globalThis.__nimbusAsyncHostValue("op_nimbus_http_route", {
+          request,
+          route,
+        });
+      }
 
-    throw new Error(`convex function or route not found: ${request.function_name}`);
-  } catch (error) {
-    if (error && typeof error === "object" && "nimbusHostError" in error) {
-      return {
-        status: "error",
-        error: error.nimbusHostError,
-      };
+      throw new Error(`nimbus function or route not found: ${request.function_name}`);
+    } catch (error) {
+      if (error && typeof error === "object" && "nimbusHostError" in error) {
+        return {
+          status: "error",
+          error: error.nimbusHostError,
+        };
+      }
+      throw error;
     }
-    throw error;
-  }
-};
+  },
+  configurable: false,
+  enumerable: false,
+  writable: false,
+});
 
-globalThis.__nimbusInvokeNamedLocal = invokeNamedDefinitionLocally;
+// HG2: invokeNamedDefinitionLocally is no longer bridged onto globalThis.
+// __nimbusCreateContext receives it directly as a call argument (see
+// runtime_bundle_preamble.mjs createRuntimeContext) so a guest handler body
+// has no guest-reachable name to reassign and redirect a later same-tenant
+// invocation's nested ctx.run* dispatch on a warm isolate.
+
+// The nested ctx.run* dispatcher resolves each callee's runtime lane HOST-side
+// (op_nimbus_ctx_resolve_callee_lane against the host registry), so the bundle
+// deliberately publishes NO per-function lane lookup or registrar. There is no
+// guest-reachable JavaScript state a handler body or an eagerly-imported
+// dependency could tamper with to force a cross-lane callee onto same-isolate
+// local dispatch.

@@ -1132,8 +1132,8 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     }
   }
   if (embedderShared) {
-    if (!unix || windows) {
-      throw new BuildError("--embedder-shared is currently supported only on Unix targets", {
+    if (!linux && !darwin) {
+      throw new BuildError("--embedder-shared is currently supported only on Linux and macOS targets", {
         hint: "Nimbus first needs the Linux/macOS in-process adapter proof before adding Windows loader semantics.",
       });
     }

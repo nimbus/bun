@@ -17,3 +17,4 @@ bun_event_loop.workspace = true
 bun_jsc.workspace = true
 bun_link_bridge.workspace = true
 bun_runtime.workspace = true
+bun_sha_hmac.workspace = true

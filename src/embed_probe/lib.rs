@@ -114,6 +114,7 @@ pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
     output_cap: usize,
     output_len: *mut usize,
 ) -> i32;
+pub type NimbusBunEmbedIsCancelledFn = unsafe extern "C" fn(context: *mut c_void) -> bool;
 
 #[derive(Clone, Copy)]
 struct HostBridgeInvocation {
@@ -232,6 +233,64 @@ function __nimbusNormalizeFunctionReference(functionRef, label) {
   };
 }
 
+function __nimbusNormalizeFieldName(field) {
+  if (typeof field === "string" && field.length > 0) {
+    return field;
+  }
+  if (
+    field !== null &&
+    typeof field === "object" &&
+    typeof field.__fieldName === "string" &&
+    field.__fieldName.length > 0
+  ) {
+    return field.__fieldName;
+  }
+  throw new Error("ctx.db field constraints require a non-empty field name");
+}
+
+function __nimbusCreateConstraintBuilder() {
+  const filters = [];
+  const builder = {
+    field(name) {
+      return { __fieldName: __nimbusNormalizeFieldName(name) };
+    },
+    eq(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "eq", value });
+      return builder;
+    },
+    neq(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "neq", value });
+      return builder;
+    },
+    gt(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "gt", value });
+      return builder;
+    },
+    gte(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "gte", value });
+      return builder;
+    },
+    lt(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "lt", value });
+      return builder;
+    },
+    lte(field, value) {
+      filters.push({ field: __nimbusNormalizeFieldName(field), op: "lte", value });
+      return builder;
+    },
+  };
+  return Object.assign(builder, { __filters: filters });
+}
+
+function __nimbusCollectConstraintFilters(builderFn, label) {
+  const builder = __nimbusCreateConstraintBuilder();
+  const result = builderFn ? builderFn(builder) : builder;
+  if (result !== undefined && result !== builder && result?.__filters !== builder.__filters) {
+    throw new Error(`ctx.db.${label}(...) must return the provided builder`);
+  }
+  return [...builder.__filters];
+}
+
 function __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId) {
   return Object.freeze({
     __builderId: builderId,
@@ -239,14 +298,14 @@ function __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId) {
       syncHostValue("op_nimbus_ctx_query_with_index", {
         builder_id: builderId,
         index_name: indexName,
-        filters: typeof builderFn === "function" ? [] : [],
+        filters: __nimbusCollectConstraintFilters(builderFn, "withIndex"),
       });
       return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
     },
-    filter() {
+    filter(builderFn) {
       syncHostValue("op_nimbus_ctx_query_filter", {
         builder_id: builderId,
-        filters: [],
+        filters: __nimbusCollectConstraintFilters(builderFn, "filter"),
       });
       return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
     },
@@ -430,17 +489,17 @@ pub extern "C" fn nimbus_bun_embed_probe_construct_and_destroy_vm() -> i32 {
     let mut workers = Vec::with_capacity(CONCURRENT_FIRST_VMS);
     let mut spawn_failed = false;
     for worker_id in 0..CONCURRENT_FIRST_VMS {
-        let gate = gate.clone();
+        let gate_for_worker = Arc::clone(&gate);
         let spawned = thread::Builder::new()
             .name(format!("nimbus-bun-init-proof-{worker_id}"))
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    construct_vm_and_run_with_init_gate(|_| 0, Some(gate.as_ref()))
+                    construct_vm_and_run_with_init_gate(|_| 0, Some(gate_for_worker.as_ref()))
                 }));
                 match result {
                     Ok(status) => status,
                     Err(_) => {
-                        gate.cancel();
+                        gate_for_worker.cancel();
                         319
                     }
                 }
@@ -518,25 +577,35 @@ pub extern "C" fn nimbus_bun_embed_probe_lifecycle_reuse_stress() -> i32 {
 pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
     bundle_ptr: *const u8,
     bundle_len: usize,
+    expected_sha256_ptr: *const u8,
+    expected_sha256_len: usize,
     request_ptr: *const u8,
     request_len: usize,
     output_ptr: *mut u8,
     output_cap: usize,
     output_len: *mut usize,
+    cancellation_context: *mut c_void,
+    is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
     if bundle_ptr.is_null() || request_ptr.is_null() || output_ptr.is_null() || output_len.is_null()
     {
+        return 300;
+    }
+    if is_cancelled.is_some() && cancellation_context.is_null() {
         return 300;
     }
 
     // SAFETY: pointer validity is the caller's ABI contract. The slices are
     // consumed synchronously before the function returns and are never stored.
     let bundle_source = unsafe { slice::from_raw_parts(bundle_ptr, bundle_len) };
+    if verify_bundle_sha256(bundle_source, expected_sha256_ptr, expected_sha256_len).is_err() {
+        return 313;
+    }
     // SAFETY: pointer validity is the caller's ABI contract. The slices are
     // consumed synchronously before the function returns and are never stored.
     let request_bytes = unsafe { slice::from_raw_parts(request_ptr, request_len) };
     let request_json = match str::from_utf8(request_bytes) {
-        Ok(request_json) => request_json,
+        Ok(request_json) => request_json.as_bytes(),
         Err(_) => return 301,
     };
 
@@ -548,6 +617,8 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
             output_ptr,
             output_cap,
             output_len,
+            cancellation_context,
+            is_cancelled,
         )
     })
 }
@@ -556,6 +627,8 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
 pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     bundle_ptr: *const u8,
     bundle_len: usize,
+    expected_sha256_ptr: *const u8,
+    expected_sha256_len: usize,
     request_ptr: *const u8,
     request_len: usize,
     output_ptr: *mut u8,
@@ -563,6 +636,8 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     output_len: *mut usize,
     host_context: *mut c_void,
     host_call_json: Option<NimbusBunEmbedHostCallJsonFn>,
+    cancellation_context: *mut c_void,
+    is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
     if bundle_ptr.is_null()
         || request_ptr.is_null()
@@ -572,6 +647,9 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     {
         return 300;
     }
+    if is_cancelled.is_some() && cancellation_context.is_null() {
+        return 300;
+    }
     let Some(host_call_json) = host_call_json else {
         return 308;
     };
@@ -579,11 +657,14 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     // SAFETY: pointer validity is the caller's ABI contract. The slices are
     // consumed synchronously before the function returns and are never stored.
     let bundle_source = unsafe { slice::from_raw_parts(bundle_ptr, bundle_len) };
+    if verify_bundle_sha256(bundle_source, expected_sha256_ptr, expected_sha256_len).is_err() {
+        return 313;
+    }
     // SAFETY: pointer validity is the caller's ABI contract. The slices are
     // consumed synchronously before the function returns and are never stored.
     let request_bytes = unsafe { slice::from_raw_parts(request_ptr, request_len) };
     let request_json = match str::from_utf8(request_bytes) {
-        Ok(request_json) => request_json,
+        Ok(request_json) => request_json.as_bytes(),
         Err(_) => return 301,
     };
 
@@ -596,8 +677,109 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
             output_ptr,
             output_cap,
             output_len,
+            cancellation_context,
+            is_cancelled,
         )
     })
+}
+
+fn verify_bundle_sha256(
+    bundle_source: &[u8],
+    expected_sha256_ptr: *const u8,
+    expected_sha256_len: usize,
+) -> Result<(), ()> {
+    if expected_sha256_len == 0 {
+        return Ok(());
+    }
+    if expected_sha256_ptr.is_null() || expected_sha256_len != 64 {
+        return Err(());
+    }
+
+    // SAFETY: a non-null 64-byte digest pointer is part of the synchronous ABI
+    // contract and is consumed before the call returns.
+    let expected = unsafe { slice::from_raw_parts(expected_sha256_ptr, expected_sha256_len) };
+    let mut actual = [0_u8; 32];
+    // SAFETY: SHA256 writes exactly the 32-byte digest and a null engine selects
+    // BoringSSL's default implementation.
+    unsafe {
+        bun_sha_hmac::SHA256::hash(bundle_source, &mut actual, core::ptr::null_mut());
+    }
+
+    let mut different = 0_u8;
+    for (index, byte) in actual.iter().enumerate() {
+        let high = decode_hex(expected[index * 2]).ok_or(())?;
+        let low = decode_hex(expected[index * 2 + 1]).ok_or(())?;
+        different |= byte ^ ((high << 4) | low);
+    }
+    if different == 0 { Ok(()) } else { Err(()) }
+}
+
+fn decode_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+struct InvocationCancellationWatcher {
+    completed: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl InvocationCancellationWatcher {
+    fn start(
+        jsc_vm: &VM,
+        context: *mut c_void,
+        is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
+    ) -> Option<Self> {
+        let is_cancelled = is_cancelled?;
+        let completed = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let completed_for_thread = Arc::clone(&completed);
+        let cancelled_for_thread = Arc::clone(&cancelled);
+        let context = context as usize;
+        let jsc_vm = core::ptr::from_ref(jsc_vm) as usize;
+        let worker = thread::spawn(move || {
+            bun_core::StackCheck::configure_thread();
+            while !completed_for_thread.load(Ordering::SeqCst) {
+                // SAFETY: the invocation owns the callback context until this
+                // watcher is joined before VM teardown.
+                if unsafe { is_cancelled(context as *mut c_void) } {
+                    cancelled_for_thread.store(true, Ordering::SeqCst);
+                    // SAFETY: the invocation joins this watcher before it can
+                    // tear down the VM referenced by this stable pointer.
+                    unsafe { &*(jsc_vm as *const VM) }.notify_need_termination();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        Some(Self {
+            completed,
+            cancelled,
+            worker: Some(worker),
+        })
+    }
+
+    fn finish(mut self) -> bool {
+        self.completed.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for InvocationCancellationWatcher {
+    fn drop(&mut self) {
+        self.completed.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
@@ -1021,7 +1203,35 @@ globalThis.__nimbusGeneratedProgramPromise
 fn run_program_wrapper_json_invocation(
     vm: &mut VirtualMachine,
     bundle_source: &[u8],
-    request_json: &str,
+    request_json: &[u8],
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+    cancellation_context: *mut c_void,
+    is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
+) -> i32 {
+    let cancellation =
+        InvocationCancellationWatcher::start(vm.jsc_vm(), cancellation_context, is_cancelled);
+    let status = run_program_wrapper_json_invocation_inner(
+        vm,
+        bundle_source,
+        request_json,
+        output_ptr,
+        output_cap,
+        output_len,
+    );
+    if cancellation.is_some_and(InvocationCancellationWatcher::finish) {
+        vm.global().clear_termination_exception();
+        314
+    } else {
+        status
+    }
+}
+
+fn run_program_wrapper_json_invocation_inner(
+    vm: &mut VirtualMachine,
+    bundle_source: &[u8],
+    request_json: &[u8],
     output_ptr: *mut u8,
     output_cap: usize,
     output_len: *mut usize,
@@ -1056,15 +1266,17 @@ fn run_program_wrapper_json_invocation(
         return status;
     }
 
-    let invocation_source = format!("globalThis.__nimbusInvoke({request_json})");
-    let result = match evaluate_program(
-        global,
-        invocation_source.as_bytes(),
-        b"nimbus-bun-linked-adapter-invoke.js",
-        303,
-    ) {
+    let request = ZigString::from_bytes(request_json).to_json_object(global);
+    if request.is_empty() || global.has_exception() {
+        return 301;
+    }
+    let invoke = match global.to_js_value().get(global, b"__nimbusInvoke") {
+        Ok(Some(invoke)) if invoke.is_callable() => invoke,
+        _ => return 303,
+    };
+    let result = match invoke.call_with_global_this(global, &[request]) {
         Ok(result) => result,
-        Err(status) => return status,
+        Err(_) => return 303,
     };
 
     let result = match result.as_promise() {
@@ -2059,6 +2271,9 @@ typeof globalThis.Bun === "undefined"
         module_policy_status_name(node_vm_module_status)
     );
     eprintln!("  require: {}", module_policy_status_name(require_status));
+    eprintln!("  require.resolve: unreachable_with_require");
+    eprintln!("  import.meta.resolve: unreachable_with_static_esm");
+    eprintln!("  node_vm_global: unreachable_with_node_vm_module");
     eprintln!(
         "  Bun.resolve: {}",
         module_policy_status_name(bun_resolve_status)
