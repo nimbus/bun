@@ -1244,10 +1244,9 @@ pub(crate) fn resolve_sync(
 
 #[bun_jsc::host_fn]
 pub(crate) fn resolve(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
-    let arguments = callframe.arguments_old::<3>();
     let value = match do_resolve_with_kind(
         global_object,
-        arguments.slice(),
+        callframe.arguments(),
         jsc::ModuleLoader::EmbedderModuleResolutionKind::BunResolve,
     ) {
         Ok(v) => v,
