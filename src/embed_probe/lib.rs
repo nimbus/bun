@@ -177,6 +177,11 @@ const __nimbusHostOperationNames = Object.freeze({
   op_nimbus_ctx_scheduler_cancel: "ctx_scheduler_cancel",
   op_nimbus_ctx_service_lookup: "ctx_service_lookup",
   op_nimbus_ctx_runtime_enter_nested_call: "ctx_runtime_enter_nested_call",
+  op_nimbus_ctx_resolve_callee_lane: "ctx_resolve_callee_lane",
+  op_nimbus_cf_kv_get: "cf_kv_get",
+  op_nimbus_cf_kv_put: "cf_kv_put",
+  op_nimbus_cf_kv_delete: "cf_kv_delete",
+  op_nimbus_cf_kv_list: "cf_kv_list",
   op_nimbus_runtime_extension_call: "runtime_extension_call",
 });
 
@@ -349,9 +354,9 @@ globalThis.__nimbusAsyncHostValue = async function(opName, payload) {
 };
 
 globalThis.__nimbusCreateContext = function(options = {}) {
-  const sessionId =
-    typeof options.sessionId === "string" && options.sessionId.length > 0
-      ? options.sessionId
+  const hostCallSessionId =
+    typeof options.hostCallSessionId === "string" && options.hostCallSessionId.length > 0
+      ? options.hostCallSessionId
       : `session-${__nimbusNextSessionId++}`;
   const requestAuth =
     options.request !== null &&
@@ -368,7 +373,7 @@ globalThis.__nimbusCreateContext = function(options = {}) {
       ? options.request.services
       : null;
   const withSession = (payload) => ({
-    session_id: sessionId,
+    host_call_session_id: hostCallSessionId,
     ...(payload ?? {}),
   });
   const syncHostValue = (opName, payload) => globalThis.__nimbusSyncHostValue(opName, withSession(payload));
