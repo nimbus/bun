@@ -2401,56 +2401,40 @@ typeof globalThis.Bun === "undefined"
             }
         };
 
-        let generated_node_builtin_status = {
-            let _lock = ProbeApiLock::new(vm.jsc_vm());
-            match evaluate_number(
-                global,
-                br#"
-(() => {
-  globalThis.__nimbusNodeBuiltinModules = new Map();
-  try {
-    nodeBuiltinModule("node:fs");
-    return 5;
-  } catch (error) {
-    return String(error && error.message || error).includes("missing generated Node.js builtin binding")
-      ? 2
-      : 4;
-  }
-})()
+        let generated_node_builtin_status = match evaluate_number_or_promise(
+            vm,
+            global,
+            br#"
+nodeBuiltinModule("node:fs").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
 "#,
-                b"nimbus-bun-embed-probe-generated-node-builtin-status.js",
-                219,
-                220,
-            ) {
-                Ok(status) => status,
-                Err(status) => return status,
-            }
+            b"nimbus-bun-embed-probe-generated-node-builtin-status.js",
+            219,
+            220,
+            223,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
         };
 
-        let generated_external_package_status = {
-            let _lock = ProbeApiLock::new(vm.jsc_vm());
-            match evaluate_number(
-                global,
-                br#"
-(() => {
-  globalThis.__nimbusNodeExternalPackages = new Map();
-  try {
-    nodeExternalPackage("left-pad");
-    return 5;
-  } catch (error) {
-    return String(error && error.message || error).includes("missing generated Node.js external package binding")
-      ? 2
-      : 4;
-  }
-})()
+        let generated_external_package_status = match evaluate_number_or_promise(
+            vm,
+            global,
+            br#"
+nodeExternalPackage("left-pad").then(
+  () => 7,
+  (error) => String(error && error.message || error).includes("Bun embedder denied module resolution") ? 8 : 6
+)
 "#,
-                b"nimbus-bun-embed-probe-generated-external-package-status.js",
-                221,
-                222,
-            ) {
-                Ok(status) => status,
-                Err(status) => return status,
-            }
+            b"nimbus-bun-embed-probe-generated-external-package-status.js",
+            221,
+            222,
+            224,
+        ) {
+            Ok(status) => status,
+            Err(status) => return status,
         };
 
         (
@@ -2462,31 +2446,6 @@ typeof globalThis.Bun === "undefined"
             generated_external_package_status,
         )
     };
-
-    if require_status != 1 {
-        return 240;
-    }
-    if dynamic_import_status != 8 {
-        return 241;
-    }
-    if dynamic_package_status != 8 {
-        return 242;
-    }
-    if plugin_virtual_module_status != 8 {
-        return 243;
-    }
-    if node_vm_module_status != 8 {
-        return 247;
-    }
-    if bun_resolve_status != 8 || bun_resolve_sync_status != 8 {
-        return 244;
-    }
-    if native_addon_resolve_sync_status != 8 {
-        return 245;
-    }
-    if generated_node_builtin_status != 2 || generated_external_package_status != 2 {
-        return 246;
-    }
 
     eprintln!("nimbus bun embed package/module policy:");
     eprintln!("  artifact_shape: self_contained_program_wrapper");
@@ -2525,16 +2484,41 @@ typeof globalThis.Bun === "undefined"
         module_policy_status_name(native_addon_resolve_sync_status)
     );
     eprintln!(
-        "  generated_node_builtin_empty_map: {}",
+        "  generated_node_builtin_helper: {}",
         module_policy_status_name(generated_node_builtin_status)
     );
     eprintln!(
-        "  generated_external_package_empty_map: {}",
+        "  generated_external_package_helper: {}",
         module_policy_status_name(generated_external_package_status)
     );
     eprintln!("  selected_next_lane: program_wrapper");
     eprintln!("  resolver_policy_hook: native_embedder_deny_all");
     eprintln!("  required_resolver_api: nimbus_owned_bun_package_resolver");
+
+    if require_status != 1 {
+        return 240;
+    }
+    if dynamic_import_status != 8 {
+        return 241;
+    }
+    if dynamic_package_status != 8 {
+        return 242;
+    }
+    if plugin_virtual_module_status != 8 {
+        return 243;
+    }
+    if node_vm_module_status != 8 {
+        return 247;
+    }
+    if bun_resolve_status != 8 || bun_resolve_sync_status != 8 {
+        return 244;
+    }
+    if native_addon_resolve_sync_status != 8 {
+        return 245;
+    }
+    if generated_node_builtin_status != 8 || generated_external_package_status != 8 {
+        return 246;
+    }
 
     0
 }
