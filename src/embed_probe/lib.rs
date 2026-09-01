@@ -2147,10 +2147,6 @@ globalThis.__nimbusMemoryProbe = undefined;
         vm.heap_size()
     };
 
-    if heap_after_load <= heap_before_load {
-        return 192;
-    }
-
     eprintln!("nimbus bun embed memory behavior:");
     eprintln!("  invocation_count: {MEMORY_BEHAVIOR_INVOCATION_COUNT}");
     eprintln!("  heap_after_setup_gc_bytes: {heap_after_setup_gc}");
@@ -2172,8 +2168,17 @@ globalThis.__nimbusMemoryProbe = undefined;
         heap_retained_after_gc.saturating_sub(heap_after_release_gc)
     );
     eprintln!("  hard_heap_limit: not_observed");
+    eprintln!("  growth_assertion: full_gc_live_size");
     eprintln!("  pressure_signal: vm.heap_size_and_sync_gc");
     eprintln!("  safe_first_policy: fresh_vm_or_discard_on_pressure");
+
+    // Heap::size() counts currently marked cells. Before a collection, its
+    // value can stay flat while JSC allocates into unmarked cells. Compare two
+    // completed full collections so this assertion has the same meaning on
+    // every supported platform.
+    if heap_retained_after_gc <= heap_after_setup_gc {
+        return 192;
+    }
 
     0
 }
