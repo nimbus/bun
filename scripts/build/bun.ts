@@ -787,13 +787,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
 
   writeIfChanged(
     resolve(cfg.buildDir, "nimbus-bun-embed-link-args.txt"),
-    [
-      ...input.allObjects,
-      ...rustLinkInputs,
-      ...input.windowsRes,
-      ...input.depLibs,
-      ...input.ldflags,
-    ].join("\n") + "\n",
+    [...input.allObjects, ...rustLinkInputs, ...input.windowsRes, ...input.depLibs, ...input.ldflags].join("\n") + "\n",
   );
 
   const exe = link(
@@ -823,17 +817,11 @@ function emitEmbedderSharedTarget(n: Ninja, cfg: Config, input: EmbedProbeTarget
   );
   writeIfChanged(exportList, sharedEmbedderExportList(cfg));
 
-  const shared = link(
-    n,
-    cfg,
-    libName,
-    [...input.allObjects, ...input.rustObjects, ...input.windowsRes],
-    {
-      libs: input.depLibs,
-      flags: sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
-      implicitInputs: [...input.implicitInputs, exportList],
-    },
-  );
+  const shared = link(n, cfg, libName, [...input.allObjects, ...input.rustObjects, ...input.windowsRes], {
+    libs: input.depLibs,
+    flags: sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
+    implicitInputs: [...input.implicitInputs, exportList],
+  });
 
   writeIfChanged(resolve(cfg.buildDir, "nimbus-bun-embed-shared-library.txt"), `${shared}\n`);
   n.phony("bun-embed-shared", [shared]);
@@ -902,13 +890,7 @@ function sharedEmbedderLinkFlags(cfg: Config, ldflags: string[], exportList: str
   if (cfg.darwin) {
     flags.push("-dynamiclib", "-Wl,-dead_strip", `-Wl,-exported_symbols_list,${exportList}`);
   } else {
-    flags.push(
-      "-shared",
-      `-Wl,-soname,${libName}`,
-      `-Wl,--version-script=${exportList}`,
-      "-Wl,-z,relro",
-      "-Wl,-z,now",
-    );
+    flags.push("-shared", `-Wl,-soname,${libName}`, `-Wl,--version-script=${exportList}`, "-Wl,-z,relro", "-Wl,-z,now");
   }
 
   return flags;

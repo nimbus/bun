@@ -108,9 +108,7 @@ export const mimalloc: Dependency = {
     // behind NOT WIN32 too).
     if (!cfg.windows) {
       const tlsModel =
-        cfg.abi === "musl" || cfg.embedderShared
-          ? "-ftls-model=local-dynamic"
-          : "-ftls-model=initial-exec";
+        cfg.abi === "musl" || cfg.embedderShared ? "-ftls-model=local-dynamic" : "-ftls-model=initial-exec";
       cflags.push(tlsModel);
     }
 
