@@ -1048,10 +1048,13 @@ static void putEmbedderDeniedGlobalFunction(JSC::VM& vm, JSC::JSGlobalObject* gl
     putEmbedderGlobalProfileValue(vm, globalObject, globalThis, name, function);
 }
 
+extern "C" void Bun__Node__EnableZeroFillBuffers();
+
 extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
+    Bun__Node__EnableZeroFillBuffers();
     globalObject->setEvalEnabled(false, "Code generation from strings disallowed by Bun embedder profile"_s);
 
     auto* globalThis = globalObject->globalThis();

@@ -4,10 +4,13 @@
 //! allocator override, no crash/signal/stdio setup, no CLI dispatch, and no
 //! process exit. The native build graph links this archive with Bun's normal
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
+//! This root is a size exception because its private ABI, JSC lifetime state,
+//! and same-process release probes share one unsafe ownership boundary. Split
+//! it only when a child can own its state without widening that boundary.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
     slice, str,
@@ -35,8 +38,89 @@ static ASYNC_TASK_RUN_COUNT: AtomicI32 = AtomicI32::new(0);
 static ASYNC_HOST_CALL_PAYLOAD: AtomicI32 = AtomicI32::new(0);
 static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
-static SPIN_ENTERED_ACK: AtomicBool = AtomicBool::new(false);
 static EMBEDDER_PROCESS_INITIALIZED: Once = Once::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpinEntryWait {
+    Entered,
+    Completed,
+    TimedOut,
+}
+
+#[derive(Default)]
+struct SpinEntryState {
+    entered: bool,
+    completed: bool,
+}
+
+#[derive(Default)]
+struct SpinEntrySignal {
+    state: Mutex<SpinEntryState>,
+    changed: Condvar,
+}
+
+impl SpinEntrySignal {
+    fn acknowledge(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        self.changed.notify_all();
+    }
+
+    fn complete(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.completed = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration) -> SpinEntryWait {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            if state.entered {
+                return SpinEntryWait::Entered;
+            }
+            if state.completed {
+                return SpinEntryWait::Completed;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return SpinEntryWait::TimedOut;
+            }
+            let (next, timed_out) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+            if timed_out.timed_out() && !state.entered && !state.completed {
+                return SpinEntryWait::TimedOut;
+            }
+        }
+    }
+}
+
+thread_local! {
+    static CURRENT_SPIN_ENTRY_SIGNAL: RefCell<Option<Arc<SpinEntrySignal>>> = const { RefCell::new(None) };
+}
+
+struct SpinEntrySignalGuard {
+    previous: Option<Arc<SpinEntrySignal>>,
+}
+
+impl SpinEntrySignalGuard {
+    fn install(signal: Arc<SpinEntrySignal>) -> Self {
+        let previous = CURRENT_SPIN_ENTRY_SIGNAL.with(|slot| slot.replace(Some(signal)));
+        Self { previous }
+    }
+}
+
+impl Drop for SpinEntrySignalGuard {
+    fn drop(&mut self) {
+        CURRENT_SPIN_ENTRY_SIGNAL.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
 
 struct InitProofGateState {
     arrivals: usize,
@@ -693,9 +777,6 @@ fn verify_bundle_sha256(
     expected_sha256_ptr: *const u8,
     expected_sha256_len: usize,
 ) -> Result<(), ()> {
-    if expected_sha256_len == 0 {
-        return Ok(());
-    }
     if expected_sha256_ptr.is_null() || expected_sha256_len != 64 {
         return Err(());
     }
@@ -1229,7 +1310,12 @@ fn run_program_wrapper_json_invocation(
     cancellation_context: *mut c_void,
     is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
-    if is_cancelled.is_some() {
+    if let Some(is_cancelled) = is_cancelled {
+        // SAFETY: the public ABI rejects a null context when it supplies this
+        // callback, and the caller owns the context until this call returns.
+        if unsafe { is_cancelled(cancellation_context) } {
+            return 314;
+        }
         let _lock = ProbeApiLock::new(vm.jsc_vm());
         // Cross-thread termination needs the sentinel to exist before the
         // watcher can request a trap on this VM.
@@ -1626,6 +1712,16 @@ typeof globalThis.process === "undefined"
     PermissionSurfaceProbe {
         name: "process.env",
         source: br#"typeof globalThis.process?.env === "undefined" ? 1 : 5"#,
+    },
+    PermissionSurfaceProbe {
+        name: "Buffer unsafe allocation zero fill",
+        source: br#"
+(() => {
+  const fast = Buffer.allocUnsafe(4096);
+  const slow = Buffer.allocUnsafeSlow(4096);
+  return fast.every((byte) => byte === 0) && slow.every((byte) => byte === 0) ? 3 : 5;
+})()
+"#,
     },
     denied_console_surface!("_stderr"),
     denied_console_surface!("_stdout"),
@@ -2546,7 +2642,7 @@ fn module_policy_status_name(status: i32) -> &'static str {
 const LIFECYCLE_FRESH_VM_ITERATIONS: usize = 4;
 const LIFECYCLE_RETAINED_INVOCATIONS: i32 = 8;
 const LIFECYCLE_CANCEL_ITERATIONS: usize = 3;
-const CANCELLATION_PROOF_MAX_ACK_SPINS: usize = 1_000_000;
+const CANCELLATION_PROOF_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
     HOST_CALL_COUNT.store(0, Ordering::SeqCst);
@@ -2856,35 +2952,30 @@ fn evaluate_generated_spin_with_deadline_timeout(
     vm: &mut VirtualMachine,
     global: &JSGlobalObject,
 ) -> Result<(), i32> {
-    let completed = Arc::new(AtomicBool::new(false));
+    let spin_entry = Arc::new(SpinEntrySignal::default());
     let deadline_fired = Arc::new(AtomicBool::new(false));
     let deadline_ack_observed = Arc::new(AtomicBool::new(false));
     let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
-    let completed_for_thread = Arc::clone(&completed);
+    let spin_entry_for_thread = Arc::clone(&spin_entry);
     let deadline_for_thread = Arc::clone(&deadline_fired);
     let deadline_ack_for_thread = Arc::clone(&deadline_ack_observed);
-    SPIN_ENTERED_ACK.store(false, Ordering::SeqCst);
     let deadline = thread::spawn(move || {
         bun_core::StackCheck::configure_thread();
-        for _ in 0..CANCELLATION_PROOF_MAX_ACK_SPINS {
-            if completed_for_thread.load(Ordering::SeqCst) {
-                return;
-            }
-            if SPIN_ENTERED_ACK.load(Ordering::SeqCst) {
+        match spin_entry_for_thread.wait(CANCELLATION_PROOF_ACK_TIMEOUT) {
+            SpinEntryWait::Entered => {
                 deadline_ack_for_thread.store(true, Ordering::SeqCst);
-                break;
             }
-            thread::yield_now();
+            SpinEntryWait::Completed => return,
+            SpinEntryWait::TimedOut => {}
         }
-        if !completed_for_thread.load(Ordering::SeqCst) {
-            deadline_for_thread.store(true, Ordering::SeqCst);
-            // SAFETY: the proof joins this thread before the VM can be torn down.
-            let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
-            jsc_vm.notify_need_termination();
-        }
+        deadline_for_thread.store(true, Ordering::SeqCst);
+        // SAFETY: the proof joins this thread before the VM can be torn down.
+        let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
+        jsc_vm.notify_need_termination();
     });
 
     let spin_evaluation = {
+        let _spin_entry_guard = SpinEntrySignalGuard::install(Arc::clone(&spin_entry));
         let _lock = vm.jsc_vm().get_api_lock();
         evaluate_generated_spin(
             vm.jsc_vm(),
@@ -2904,7 +2995,7 @@ fn evaluate_generated_spin_with_deadline_timeout(
         }
         Ok(())
     });
-    completed.store(true, Ordering::SeqCst);
+    spin_entry.complete();
     if deadline.join().is_err() {
         return Err(46);
     }
@@ -2927,35 +3018,30 @@ fn evaluate_generated_spin_with_external_cancel(
     vm: &mut VirtualMachine,
     global: &JSGlobalObject,
 ) -> Result<(), i32> {
-    let completed = Arc::new(AtomicBool::new(false));
+    let spin_entry = Arc::new(SpinEntrySignal::default());
     let cancel_fired = Arc::new(AtomicBool::new(false));
     let cancel_ack_observed = Arc::new(AtomicBool::new(false));
     let jsc_vm_ptr = core::ptr::from_ref(vm.jsc_vm()) as usize;
-    let completed_for_thread = Arc::clone(&completed);
+    let spin_entry_for_thread = Arc::clone(&spin_entry);
     let cancel_for_thread = Arc::clone(&cancel_fired);
     let cancel_ack_for_thread = Arc::clone(&cancel_ack_observed);
-    SPIN_ENTERED_ACK.store(false, Ordering::SeqCst);
     let canceller = thread::spawn(move || {
         bun_core::StackCheck::configure_thread();
-        for _ in 0..CANCELLATION_PROOF_MAX_ACK_SPINS {
-            if completed_for_thread.load(Ordering::SeqCst) {
-                return;
-            }
-            if SPIN_ENTERED_ACK.load(Ordering::SeqCst) {
+        match spin_entry_for_thread.wait(CANCELLATION_PROOF_ACK_TIMEOUT) {
+            SpinEntryWait::Entered => {
                 cancel_ack_for_thread.store(true, Ordering::SeqCst);
-                break;
             }
-            thread::yield_now();
+            SpinEntryWait::Completed => return,
+            SpinEntryWait::TimedOut => {}
         }
-        if !completed_for_thread.load(Ordering::SeqCst) {
-            cancel_for_thread.store(true, Ordering::SeqCst);
-            // SAFETY: the proof joins this thread before the VM can be torn down.
-            let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
-            jsc_vm.notify_need_termination();
-        }
+        cancel_for_thread.store(true, Ordering::SeqCst);
+        // SAFETY: the proof joins this thread before the VM can be torn down.
+        let jsc_vm = unsafe { &*(jsc_vm_ptr as *const VM) };
+        jsc_vm.notify_need_termination();
     });
 
     let spin_evaluation = {
+        let _spin_entry_guard = SpinEntrySignalGuard::install(Arc::clone(&spin_entry));
         let _lock = vm.jsc_vm().get_api_lock();
         evaluate_generated_spin(
             vm.jsc_vm(),
@@ -2976,7 +3062,7 @@ fn evaluate_generated_spin_with_external_cancel(
         }
         Ok(())
     });
-    completed.store(true, Ordering::SeqCst);
+    spin_entry.complete();
     if canceller.join().is_err() {
         return Err(55);
     }
@@ -3345,6 +3431,10 @@ pub fn nimbus_bun_embed_spin_entered_ack(
     _global: &JSGlobalObject,
     _frame: &CallFrame,
 ) -> JsResult<JSValue> {
-    SPIN_ENTERED_ACK.store(true, Ordering::SeqCst);
+    CURRENT_SPIN_ENTRY_SIGNAL.with(|slot| {
+        if let Some(signal) = slot.borrow().as_ref() {
+            signal.acknowledge();
+        }
+    });
     Ok(JSValue::js_number_from_int32(1))
 }
