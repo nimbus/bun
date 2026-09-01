@@ -442,13 +442,6 @@ globalThis.__nimbusCreateContext = function(options = {}) {
     typeof options.hostCallSessionId === "string" && options.hostCallSessionId.length > 0
       ? options.hostCallSessionId
       : `session-${__nimbusNextSessionId++}`;
-  const requestAuth =
-    options.request !== null &&
-    typeof options.request === "object" &&
-    options.request.auth !== null &&
-    typeof options.request.auth === "object"
-      ? options.request.auth
-      : null;
   const services =
     options.request !== null &&
     typeof options.request === "object" &&
@@ -467,7 +460,6 @@ globalThis.__nimbusCreateContext = function(options = {}) {
     return asyncHostValue(opName, {
       ...normalized,
       args,
-      ...(requestAuth ? { auth: requestAuth } : {}),
     });
   };
   return {
@@ -680,9 +672,12 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
     {
         return 300;
     }
-    if is_cancelled.is_some() && cancellation_context.is_null() {
+    if cancellation_context.is_null() {
         return 300;
     }
+    let Some(is_cancelled) = is_cancelled else {
+        return 300;
+    };
 
     // SAFETY: pointer validity is the caller's ABI contract. The slices are
     // consumed synchronously before the function returns and are never stored.
@@ -736,9 +731,12 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     {
         return 300;
     }
-    if is_cancelled.is_some() && cancellation_context.is_null() {
+    if cancellation_context.is_null() {
         return 300;
     }
+    let Some(is_cancelled) = is_cancelled else {
+        return 300;
+    };
     let Some(host_call_json) = host_call_json else {
         return 308;
     };
@@ -819,11 +817,8 @@ impl InvocationCancellationWatcher {
     fn start(
         jsc_vm: &VM,
         context: *mut c_void,
-        is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
-    ) -> Result<Option<Self>, ()> {
-        let Some(is_cancelled) = is_cancelled else {
-            return Ok(None);
-        };
+        is_cancelled: NimbusBunEmbedIsCancelledFn,
+    ) -> Result<Self, ()> {
         let completed = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
         let completed_for_thread = Arc::clone(&completed);
@@ -848,11 +843,11 @@ impl InvocationCancellationWatcher {
                 }
             })
             .map_err(|_| ())?;
-        Ok(Some(Self {
+        Ok(Self {
             completed,
             cancelled,
             worker: Some(worker),
-        }))
+        })
     }
 
     fn finish(mut self) -> Result<bool, ()> {
@@ -1308,19 +1303,17 @@ fn run_program_wrapper_json_invocation(
     output_cap: usize,
     output_len: *mut usize,
     cancellation_context: *mut c_void,
-    is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
+    is_cancelled: NimbusBunEmbedIsCancelledFn,
 ) -> i32 {
-    if let Some(is_cancelled) = is_cancelled {
-        // SAFETY: the public ABI rejects a null context when it supplies this
-        // callback, and the caller owns the context until this call returns.
-        if unsafe { is_cancelled(cancellation_context) } {
-            return 314;
-        }
-        let _lock = ProbeApiLock::new(vm.jsc_vm());
-        // Cross-thread termination needs the sentinel to exist before the
-        // watcher can request a trap on this VM.
-        let _ = vm.jsc_vm().termination_exception();
+    // SAFETY: the public ABI requires a non-null context and callback, and the
+    // caller owns the context until this synchronous call returns.
+    if unsafe { is_cancelled(cancellation_context) } {
+        return 314;
     }
+    let _lock = ProbeApiLock::new(vm.jsc_vm());
+    // Cross-thread termination needs the sentinel to exist before the watcher
+    // can request a trap on this VM.
+    let _ = vm.jsc_vm().termination_exception();
     let cancellation =
         match InvocationCancellationWatcher::start(vm.jsc_vm(), cancellation_context, is_cancelled)
         {
@@ -1335,15 +1328,12 @@ fn run_program_wrapper_json_invocation(
         output_cap,
         output_len,
     );
-    let cancelled = match cancellation {
-        Some(cancellation) => match cancellation.finish() {
-            Ok(cancelled) => cancelled,
-            Err(()) => {
-                vm.global().clear_termination_exception();
-                return 316;
-            }
-        },
-        None => false,
+    let cancelled = match cancellation.finish() {
+        Ok(cancelled) => cancelled,
+        Err(()) => {
+            vm.global().clear_termination_exception();
+            return 316;
+        }
     };
     if cancelled {
         vm.global().clear_termination_exception();

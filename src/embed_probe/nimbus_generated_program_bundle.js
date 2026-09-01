@@ -119,10 +119,10 @@ function nimbusRemapHandlerError(error, origin) {
   return remapped;
 }
 
-function nimbusWrapRuntimeInvoke(invoke, bindingValues, ctx, args, request, origin) {
+function nimbusWrapRuntimeInvoke(invoke, bindingValues, ctx, args, origin) {
   let result;
   try {
-    result = invoke(...bindingValues, ctx, args, request);
+    result = invoke(...bindingValues, ctx, args);
   } catch (error) {
     throw nimbusRemapHandlerError(error, origin);
   }
@@ -151,20 +151,20 @@ const runtimeHandlerFactoriesByName = new Map([
       const runtimeBindings = await materializeRuntimeBindings(definition.runtime_bindings);
       const bindingValues = ["internalScheduledFunctions"].map(name => runtimeBindings[name]);
       const invoke = (
-        internalScheduledFunctions => (ctx, args, request) =>
+        internalScheduledFunctions => (ctx, args) =>
           (async (ctx, { body }) => {
             const id = await ctx.db.insert("messages", { body });
             await ctx.scheduler.runAfter(1_000, internalScheduledFunctions.messages.sendInternal, {
               body: `${body} later`,
             });
             return id;
-          })(ctx, args, request)
+          })(ctx, args)
       )(...bindingValues);
       const handlerOrigin = {
         module: typeof definition.module === "string" ? definition.module : null,
         line: typeof definition.runtime_handler_line === "number" ? definition.runtime_handler_line : null,
       };
-      return (ctx, args, request) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, request, handlerOrigin);
+      return (ctx, args) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, handlerOrigin);
     },
   ],
   [
@@ -173,17 +173,17 @@ const runtimeHandlerFactoriesByName = new Map([
       const runtimeBindings = await materializeRuntimeBindings(definition.runtime_bindings);
       const bindingValues = ["internalScheduledFunctions"].map(name => runtimeBindings[name]);
       const invoke = (
-        internalScheduledFunctions => (ctx, args, request) =>
+        internalScheduledFunctions => (ctx, args) =>
           (async (_ctx, { body }) => {
             body.trim();
             while (true) {}
-          })(ctx, args, request)
+          })(ctx, args)
       )(...bindingValues);
       const handlerOrigin = {
         module: typeof definition.module === "string" ? definition.module : null,
         line: typeof definition.runtime_handler_line === "number" ? definition.runtime_handler_line : null,
       };
-      return (ctx, args, request) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, request, handlerOrigin);
+      return (ctx, args) => nimbusWrapRuntimeInvoke(invoke, [], ctx, args, handlerOrigin);
     },
   ],
 ]);
@@ -338,7 +338,7 @@ async function executeQueryDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
   const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
-    return await runtimeHandler(ctx, request.args ?? {}, request);
+    return await runtimeHandler(ctx, request.args ?? {});
   }
   const plan = resolveArgsTemplate(definition.plan, request.args ?? {});
   return await executeResolvedQueryPlan(ctx, plan);
@@ -347,7 +347,7 @@ async function executeQueryDefinition(definition, request) {
 async function executePaginatedQueryDefinition(definition, request) {
   const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
-    const result = await runtimeHandler(createRuntimeContext(request), request.args ?? {}, request);
+    const result = await runtimeHandler(createRuntimeContext(request), request.args ?? {});
     if (isRuntimeQueryBuilder(result)) {
       if (typeof request.page_size !== "number") {
         throw new Error("paginated runtime invocation missing page_size");
@@ -377,7 +377,7 @@ async function executeMutationDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
   const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
-    return await runtimeHandler(ctx, request.args ?? {}, request);
+    return await runtimeHandler(ctx, request.args ?? {});
   }
   const plan = resolveArgsTemplate(definition.plan, request.args ?? {});
   return await executeResolvedMutationPlan(ctx, plan);
@@ -387,7 +387,7 @@ async function executeActionDefinition(definition, request) {
   const ctx = createRuntimeContext(request);
   const runtimeHandler = await getRuntimeHandler(definition);
   if (runtimeHandler) {
-    return await runtimeHandler(ctx, request.args ?? {}, request);
+    return await runtimeHandler(ctx, request.args ?? {});
   }
   const plan = resolveArgsTemplate(definition.plan, request.args ?? {});
   return await executeResolvedActionPlan(ctx, plan, request);
