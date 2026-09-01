@@ -790,7 +790,7 @@ fn construct_vm_and_run_with_init_gate(
     run: impl FnOnce(&mut VirtualMachine) -> i32,
     init_proof_gate: Option<&InitProofGate>,
 ) -> i32 {
-    bun_core::output::init_test();
+    bun_core::output::init_embedder_thread();
     bun_core::StackCheck::configure_thread();
 
     if init_proof_gate.is_some_and(|gate| !gate.arrive_and_wait()) {
@@ -798,7 +798,6 @@ fn construct_vm_and_run_with_init_gate(
     }
 
     EMBEDDER_PROCESS_INITIALIZED.call_once(|| {
-        bun_runtime::allocators::register_safety_vtables();
         bun_jsc::initialize(false);
 
         // Touch the high-tier runtime hooks so this staticlib root owns
@@ -1359,9 +1358,7 @@ fn run_timeout_and_cancel_probe(vm: &mut VirtualMachine) -> i32 {
         let _lock = vm.jsc_vm().get_api_lock();
         // Cross-thread `notify_need_termination` expects JSC's termination
         // exception to have been materialized by the owning thread first.
-        global.request_termination();
-        global.clear_termination_exception();
-        vm.jsc_vm().clear_has_termination_request();
+        let _ = vm.jsc_vm().termination_exception();
 
         let context_loaded = match evaluate_program(
             global,
@@ -1817,7 +1814,7 @@ globalThis.__nimbusCreateContext = () => ({
     }
 
     let heap_after_setup_gc = vm.garbage_collect(true);
-    let heap_before_load = vm.jsc_vm().heap_size();
+    let heap_before_load = vm.heap_size();
 
     let invocation_promise = {
         let _lock = vm.jsc_vm().get_api_lock();
@@ -1884,7 +1881,7 @@ globalThis.__nimbusMemoryProbe()
         return 189;
     }
 
-    let heap_after_load = vm.jsc_vm().heap_size();
+    let heap_after_load = vm.heap_size();
     let heap_retained_after_gc = vm.garbage_collect(true);
 
     {
@@ -1911,7 +1908,7 @@ globalThis.__nimbusMemoryProbe = undefined;
     let heap_after_shrink = {
         let _lock = vm.jsc_vm().get_api_lock();
         vm.jsc_vm().shrink_footprint();
-        vm.jsc_vm().heap_size()
+        vm.heap_size()
     };
 
     if heap_after_load <= heap_before_load {
@@ -2414,9 +2411,9 @@ fn run_lifecycle_reuse_stress_probe(vm: &mut VirtualMachine) -> i32 {
     let global = vm.global();
     {
         let _lock = ProbeApiLock::new(vm.jsc_vm());
-        global.request_termination();
-        global.clear_termination_exception();
-        vm.jsc_vm().clear_has_termination_request();
+        // Materialize the sentinel on the owning thread before a cancellation
+        // thread can request termination at a JSC safepoint.
+        let _ = vm.jsc_vm().termination_exception();
 
         global.to_js_value().put(
             global,
@@ -2766,9 +2763,6 @@ fn evaluate_generated_spin_with_deadline_timeout(
     if !deadline_fired.load(Ordering::SeqCst) {
         return Err(48);
     }
-    if vm.jsc_vm().has_execution_time_limit() {
-        return Err(49);
-    }
     if vm.jsc_vm().has_termination_request() {
         return Err(64);
     }
@@ -2842,9 +2836,6 @@ fn evaluate_generated_spin_with_external_cancel(
     }
     if vm.jsc_vm().has_termination_request() {
         return Err(58);
-    }
-    if vm.jsc_vm().has_execution_time_limit() {
-        return Err(59);
     }
     Ok(())
 }
@@ -2971,7 +2962,7 @@ fn evaluate_generated_spin(
     };
 
     if !exception.is_empty() {
-        if is_termination_signal(jsc_vm, exception)
+        if is_termination_signal(exception)
             || jsc_vm.has_termination_request()
             || !global.clear_exception_except_termination()
         {
@@ -3021,16 +3012,8 @@ fn generated_spin_loop_was_entered(global: &JSGlobalObject) -> bool {
         && value.as_number() as i32 == 1
 }
 
-fn is_termination_signal(jsc_vm: &VM, exception: JSValue) -> bool {
-    if exception.is_termination_exception() {
-        return true;
-    }
-    let Some(exception) = exception.as_exception(core::ptr::from_ref(jsc_vm).cast_mut()) else {
-        return false;
-    };
-    // SAFETY: `as_exception` proved the JS value is backed by a live JSC
-    // Exception cell for this VM.
-    jsc_vm.is_termination_exception(unsafe { &*exception })
+fn is_termination_signal(exception: JSValue) -> bool {
+    exception.is_termination_exception()
 }
 
 struct ProbeApiLock {

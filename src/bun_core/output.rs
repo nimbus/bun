@@ -238,6 +238,20 @@ thread_local! {
 static STDERR_STREAM: crate::RacyCell<StreamType> = crate::RacyCell::new(StreamType::ZEROED);
 static STDOUT_STREAM: crate::RacyCell<StreamType> = crate::RacyCell::new(StreamType::ZEROED);
 static STDOUT_STREAM_SET: AtomicBool = AtomicBool::new(false);
+static EMBEDDER_STREAMS_INITIALIZED: std::sync::Once = std::sync::Once::new();
+
+/// Configure Bun's output source for the current non-CLI embedder thread.
+///
+/// The first caller publishes the process-wide stdout and stderr handles.
+/// Concurrent and later callers initialize only their thread-local source.
+pub fn init_embedder_thread() {
+    EMBEDDER_STREAMS_INITIALIZED.call_once(|| {
+        if !STDOUT_STREAM_SET.load(Ordering::Relaxed) {
+            Source::set_init(File::from(Fd::stdout()), File::from(Fd::stderr()));
+        }
+    });
+    Source::configure_thread_no_js();
+}
 
 // Track which stdio descriptors are TTYs (0=stdin, 1=stdout, 2=stderr).
 // `[AtomicI32; 3]` has identical layout to `[i32; 3]` (`AtomicI32` is
