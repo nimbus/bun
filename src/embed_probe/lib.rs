@@ -6,7 +6,13 @@
 //! C++/WebKit/JSC objects through the opt-in `check-bun-embed-probe` target.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
-use std::{cell::Cell, ffi::c_void, slice, str, sync::Arc, thread};
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    slice, str,
+    sync::{Arc, Once},
+    thread,
+};
 
 use bun_core::ZigString;
 use bun_jsc::virtual_machine::{InitOptions, VirtualMachine};
@@ -27,8 +33,8 @@ static ASYNC_TASK_RUN_COUNT: AtomicI32 = AtomicI32::new(0);
 static ASYNC_HOST_CALL_PAYLOAD: AtomicI32 = AtomicI32::new(0);
 static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
-static SAFETY_VTABLES_REGISTERED: AtomicBool = AtomicBool::new(false);
 static SPIN_ENTERED_ACK: AtomicBool = AtomicBool::new(false);
+static EMBEDDER_PROCESS_INITIALIZED: Once = Once::new();
 
 pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
     context: *mut c_void,
@@ -486,14 +492,16 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
     bun_core::output::init_test();
     bun_core::StackCheck::configure_thread();
-    if !SAFETY_VTABLES_REGISTERED.swap(true, Ordering::SeqCst) {
-        bun_runtime::allocators::register_safety_vtables();
-    }
-    bun_jsc::initialize(false);
 
-    // Touch the high-tier runtime hooks so this staticlib root owns
-    // `__BUN_RUNTIME_HOOKS` without depending on Bun's process-owned CLI root.
-    bun_runtime::jsc_hooks::embedder_touch_runtime_state();
+    EMBEDDER_PROCESS_INITIALIZED.call_once(|| {
+        bun_runtime::allocators::register_safety_vtables();
+        bun_jsc::initialize(false);
+
+        // Touch the high-tier runtime hooks so this staticlib root owns
+        // `__BUN_RUNTIME_HOOKS` without depending on Bun's process-owned CLI
+        // root.
+        bun_runtime::jsc_hooks::embedder_touch_runtime_state();
+    });
 
     let opts = InitOptions {
         is_main_thread: false,
