@@ -9,9 +9,11 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use std::{
     cell::Cell,
     ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
     slice, str,
-    sync::{Arc, Barrier, Once},
+    sync::{Arc, Condvar, Mutex, Once},
     thread,
+    time::{Duration, Instant},
 };
 
 use bun_core::ZigString;
@@ -35,6 +37,74 @@ static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
 static SPIN_ENTERED_ACK: AtomicBool = AtomicBool::new(false);
 static EMBEDDER_PROCESS_INITIALIZED: Once = Once::new();
+
+struct InitProofGateState {
+    arrivals: usize,
+    released: bool,
+    cancelled: bool,
+}
+
+struct InitProofGate {
+    expected: usize,
+    state: Mutex<InitProofGateState>,
+    changed: Condvar,
+}
+
+impl InitProofGate {
+    fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            state: Mutex::new(InitProofGateState {
+                arrivals: 0,
+                released: false,
+                cancelled: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.cancelled = true;
+        state.released = true;
+        self.changed.notify_all();
+    }
+
+    fn arrive_and_wait(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            return false;
+        }
+        state.arrivals += 1;
+        if state.arrivals == self.expected {
+            state.released = true;
+            self.changed.notify_all();
+        }
+
+        while !state.released {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                state.cancelled = true;
+                state.released = true;
+                self.changed.notify_all();
+                return false;
+            }
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+            if timeout.timed_out() && !state.released {
+                state.cancelled = true;
+                state.released = true;
+                self.changed.notify_all();
+                return false;
+            }
+        }
+        !state.cancelled
+    }
+}
 
 pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
     context: *mut c_void,
@@ -356,25 +426,46 @@ unsafe extern "C" {
 pub extern "C" fn nimbus_bun_embed_probe_construct_and_destroy_vm() -> i32 {
     const CONCURRENT_FIRST_VMS: usize = 4;
 
-    let barrier = Arc::new(Barrier::new(CONCURRENT_FIRST_VMS));
-    let workers = (0..CONCURRENT_FIRST_VMS)
-        .map(|_| {
-            let barrier = barrier.clone();
-            thread::spawn(move || {
-                barrier.wait();
-                construct_vm_and_run(|_| 0)
-            })
-        })
-        .collect::<Vec<_>>();
+    let gate = Arc::new(InitProofGate::new(CONCURRENT_FIRST_VMS));
+    let mut workers = Vec::with_capacity(CONCURRENT_FIRST_VMS);
+    let mut spawn_failed = false;
+    for worker_id in 0..CONCURRENT_FIRST_VMS {
+        let gate = gate.clone();
+        let spawned = thread::Builder::new()
+            .name(format!("nimbus-bun-init-proof-{worker_id}"))
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    construct_vm_and_run_with_init_gate(|_| 0, Some(gate.as_ref()))
+                }));
+                match result {
+                    Ok(status) => status,
+                    Err(_) => {
+                        gate.cancel();
+                        319
+                    }
+                }
+            });
+        match spawned {
+            Ok(worker) => workers.push(worker),
+            Err(_) => {
+                spawn_failed = true;
+                gate.cancel();
+                break;
+            }
+        }
+    }
 
+    let mut aggregate_status = if spawn_failed { 317 } else { 0 };
     for worker in workers {
         match worker.join() {
             Ok(0) => {}
-            Ok(status) => return status,
-            Err(_) => return 319,
+            Ok(status) if aggregate_status == 0 => aggregate_status = status,
+            Ok(_) => {}
+            Err(_) if aggregate_status == 0 => aggregate_status = 319,
+            Err(_) => {}
         }
     }
-    0
+    aggregate_status
 }
 
 #[unsafe(no_mangle)]
@@ -510,8 +601,19 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
 }
 
 fn construct_vm_and_run(run: impl FnOnce(&mut VirtualMachine) -> i32) -> i32 {
+    construct_vm_and_run_with_init_gate(run, None)
+}
+
+fn construct_vm_and_run_with_init_gate(
+    run: impl FnOnce(&mut VirtualMachine) -> i32,
+    init_proof_gate: Option<&InitProofGate>,
+) -> i32 {
     bun_core::output::init_test();
     bun_core::StackCheck::configure_thread();
+
+    if init_proof_gate.is_some_and(|gate| !gate.arrive_and_wait()) {
+        return 318;
+    }
 
     EMBEDDER_PROCESS_INITIALIZED.call_once(|| {
         bun_runtime::allocators::register_safety_vtables();
