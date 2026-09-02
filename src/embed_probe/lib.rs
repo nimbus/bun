@@ -810,6 +810,8 @@ fn decode_hex(byte: u8) -> Option<u8> {
 struct InvocationCancellationWatcher {
     completed: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    context: usize,
+    is_cancelled: NimbusBunEmbedIsCancelledFn,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -846,6 +848,8 @@ impl InvocationCancellationWatcher {
         Ok(Self {
             completed,
             cancelled,
+            context,
+            is_cancelled,
             worker: Some(worker),
         })
     }
@@ -855,7 +859,12 @@ impl InvocationCancellationWatcher {
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| ())?;
         }
-        Ok(self.cancelled.load(Ordering::SeqCst))
+        let watcher_observed_cancellation = self.cancelled.load(Ordering::SeqCst);
+        // The invocation can complete between the watcher's polling intervals.
+        // Read the token once on the owner thread before the callback context
+        // leaves scope so a fast guest catch cannot hide host cancellation.
+        let token_is_cancelled = unsafe { (self.is_cancelled)(self.context as *mut c_void) };
+        Ok(watcher_observed_cancellation || token_is_cancelled)
     }
 }
 
