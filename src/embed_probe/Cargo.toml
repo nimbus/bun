@@ -18,3 +18,4 @@ bun_jsc.workspace = true
 bun_link_bridge.workspace = true
 bun_runtime.workspace = true
 bun_sha_hmac.workspace = true
+libc.workspace = true
