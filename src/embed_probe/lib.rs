@@ -198,6 +198,9 @@ pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
     output_cap: usize,
     output_len: *mut usize,
 ) -> i32;
+// ABI 3 calls the host once with a non-null request. If that call returns 307,
+// the host retains the completed response and a null, zero-length request takes
+// it without repeating the operation.
 pub type NimbusBunEmbedIsCancelledFn = unsafe extern "C" fn(context: *mut c_void) -> bool;
 
 #[derive(Clone, Copy)]
@@ -3422,7 +3425,7 @@ pub fn nimbus_bun_embed_host_bridge_call_json(
     let mut output = vec![0_u8; NIMBUS_HOST_BRIDGE_OUTPUT_CAP];
     let mut output_len = 0_usize;
 
-    let status = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
+    let mut status = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
         let Some(invocation) = slot.get() else {
             return 311;
         };
@@ -3440,6 +3443,50 @@ pub fn nimbus_bun_embed_host_bridge_call_json(
             )
         }
     });
+
+    if status == 307 {
+        if output_len <= output.len() {
+            return Ok(host_bridge_response_json_to_js(
+                global,
+                br#"{"status":"error","error":{"code":"invalid_host_bridge_response_length","message":"host bridge reported overflow without a larger response length"}}"#,
+            ));
+        }
+        let required_len = output_len;
+        let mut completed = Vec::new();
+        if completed.try_reserve_exact(required_len).is_err() {
+            return Ok(host_bridge_response_json_to_js(
+                global,
+                br#"{"status":"error","error":{"code":"host_bridge_response_allocation_failed","message":"host bridge response could not be retained within the runtime memory budget"}}"#,
+            ));
+        }
+        completed.resize(required_len, 0);
+        output_len = 0;
+        status = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
+            let Some(invocation) = slot.get() else {
+                return 311;
+            };
+            // SAFETY: ABI 3 uses a null, zero-length request to take the
+            // response retained by the first callback without another host
+            // operation. The output buffer remains borrowed for this call.
+            unsafe {
+                (invocation.call_json)(
+                    invocation.context,
+                    core::ptr::null(),
+                    0,
+                    completed.as_mut_ptr(),
+                    completed.len(),
+                    &mut output_len,
+                )
+            }
+        });
+        if status == 0 && output_len != required_len {
+            return Ok(host_bridge_response_json_to_js(
+                global,
+                br#"{"status":"error","error":{"code":"host_bridge_response_length_changed","message":"host bridge changed the completed response length during retrieval"}}"#,
+            ));
+        }
+        output = completed;
+    }
 
     if status != 0 {
         return Ok(host_bridge_response_json_to_js(

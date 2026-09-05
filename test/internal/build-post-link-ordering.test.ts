@@ -201,6 +201,8 @@ describe("Nimbus embedder build contract", () => {
     expect(driverGenerator).toContain("nimbus_bun_embed_take_pending_response");
     expect(driverGenerator).toContain("status != 307 || retry_len != pending_len");
     expect(driverGenerator).toContain("nimbus_bun_embed_driver_host_calls.load() != 2");
+    expect(driverGenerator).toContain("nimbus_bun_embed_driver_overflow_host_bridge");
+    expect(driverGenerator).toContain("nimbus_bun_embed_driver_overflow_host_calls.load() != 1");
   });
 
   test("probe archive tracks its embedded JavaScript bundle", () => {
