@@ -215,4 +215,14 @@ describe("Nimbus embedder build contract", () => {
       'embeddedSources: [resolve(cfg.cwd, "src/embed_probe/nimbus_generated_program_bundle.js")]',
     );
   });
+
+  test("generated wrapper never sends a guest-held HTTP route plan to the host", () => {
+    const source = readFileSync(
+      resolve(import.meta.dir, "..", "..", "src", "embed_probe", "nimbus_generated_program_bundle.js"),
+      "utf8",
+    );
+
+    expect(source).toContain('__nimbusAsyncHostValue("op_nimbus_http_route", {');
+    expect(source).not.toMatch(/op_nimbus_http_route[\s\S]{0,120}\n\s*route,/);
+  });
 });
