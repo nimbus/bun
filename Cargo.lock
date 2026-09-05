@@ -546,6 +546,7 @@ dependencies = [
  "bun_link_bridge",
  "bun_runtime",
  "bun_sha_hmac",
+ "libc",
 ]
 
 [[package]]
