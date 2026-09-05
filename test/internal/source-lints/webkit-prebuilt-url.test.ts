@@ -2,6 +2,7 @@
  * WEBKIT_VERSION is used as the release tag; --webkit-version overrides still
  * hit the plain `autobuild-<sha>` tag. Configure-time only. */
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 
 import { resolveConfig, type Config, type PartialConfig, type Toolchain } from "../../../scripts/build/config.ts";
 import { webkit, WEBKIT_VERSION } from "../../../scripts/build/deps/webkit.ts";
@@ -64,6 +65,12 @@ function prebuiltUrlOf(cfg: Config): string {
   return src.url;
 }
 
+function localBuildOf(cfg: Config) {
+  const build = webkit.build(cfg);
+  if (build.kind !== "nested-cmake") throw new Error(`expected nested-cmake build, got ${build.kind}`);
+  return build;
+}
+
 describe("WebKit prebuilt URL", () => {
   // Mirrors prebuiltUrl(): 40-hex shas get the autobuild- prefix, tags pass
   // through, so these assertions hold for both WEBKIT_VERSION forms.
@@ -121,5 +128,20 @@ describe("WebKit prebuilt URL", () => {
 
   test("WEBKIT_VERSION is either a 40-hex sha or an autobuild-* tag", () => {
     expect(/^[0-9a-f]{40}$/.test(WEBKIT_VERSION) || WEBKIT_VERSION.startsWith("autobuild-")).toBe(true);
+  });
+
+  test("local mimalloc builds expose private headers to JavaScriptCore", () => {
+    const previous = process.env.BUN_WEBKIT_PATH;
+    const webkitPath = resolve(process.cwd(), "WebKit source");
+    process.env.BUN_WEBKIT_PATH = webkitPath;
+    try {
+      const cfg = resolveLinuxRelease({ embedderShared: true, webkit: "local" });
+      const build = localBuildOf(cfg);
+      const expected = `${webkitPath.replaceAll("\\", "/")}/Source/bmalloc/mimalloc/mimalloc/include`;
+      expect(build.args.CMAKE_CXX_FLAGS).toContain(`-I'${expected}'`);
+    } finally {
+      if (previous === undefined) delete process.env.BUN_WEBKIT_PATH;
+      else process.env.BUN_WEBKIT_PATH = previous;
+    }
   });
 });

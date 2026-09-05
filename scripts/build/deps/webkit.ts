@@ -43,7 +43,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Config } from "../config.ts";
 import { computeCpuTargetFlags } from "../flags.ts";
-import { slash } from "../shell.ts";
+import { quote, slash } from "../shell.ts";
 import { type Dependency, type NestedCmakeBuild, type Source, depBuildDir, depSourceDir } from "../source.ts";
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -292,6 +292,12 @@ export const webkit: Dependency = {
     if (cfg.simdutfNamespace !== undefined) {
       cxxOptFlagStr += ` -Dsimdutf=${cfg.simdutfNamespace}`;
     }
+    if (!cfg.asan) {
+      // JavaScriptCore includes mimalloc/types.h directly, but WebKit keeps
+      // mimalloc's include directory private to its bmalloc target.
+      const mimallocInclude = slash(join(webkitSrcDir(cfg), "Source", "bmalloc", "mimalloc", "mimalloc", "include"));
+      cxxOptFlagStr += ` -I${quote(mimallocInclude, cfg.windows)}`;
+    }
     const args: Record<string, string> = {
       CMAKE_C_FLAGS: optFlagStr,
       CMAKE_CXX_FLAGS: cxxOptFlagStr,
@@ -375,7 +381,7 @@ export const webkit: Dependency = {
       // U_STATIC_IMPLEMENTATION: ICU headers default to dllimport; we
       // link statically. Matches what the old cmake's SetupWebKit did.
       args.CMAKE_C_FLAGS = `/DU_STATIC_IMPLEMENTATION ${optFlagStr}`.trim();
-      args.CMAKE_CXX_FLAGS = `/DU_STATIC_IMPLEMENTATION /clang:-fno-c++-static-destructors ${optFlagStr}`.trim();
+      args.CMAKE_CXX_FLAGS = `/DU_STATIC_IMPLEMENTATION /clang:-fno-c++-static-destructors ${cxxOptFlagStr}`.trim();
       // Static CRT to match bun + all other deps (we build everything
       // with /MTd or /MT). Without this, cmake defaults to /MDd →
       // RuntimeLibrary mismatch at link.
