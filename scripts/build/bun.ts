@@ -41,7 +41,7 @@ import { assert } from "./error.ts";
 import { bunIncludes, computeFlags, extraFlagsFor, linkDepends, linkerMapOutputs } from "./flags.ts";
 import { writeIfChanged } from "./fs.ts";
 import type { BuildNode, Ninja } from "./ninja.ts";
-import { emitRust, emitRustArchive, rustLibPath } from "./rust.ts";
+import { emitRust, emitRustArchive, rustLibPath, rustLinkFlags } from "./rust.ts";
 import { quote, slash } from "./shell.ts";
 import { emitShims, machoPostlinkCommand, machoPostlinkImplicitInputs } from "./shims.ts";
 import { computeDepLibs, resolveDep, type ResolvedDep } from "./source.ts";
@@ -880,10 +880,13 @@ function emitEmbedderSharedTarget(n: Ninja, cfg: Config, input: EmbedProbeTarget
   );
   writeIfChanged(exportList, sharedEmbedderExportList(cfg));
 
-  const shared = link(n, cfg, libName, [...input.allObjects, ...input.rustObjects, ...input.windowsRes], {
+  const shared = link(n, cfg, libName, [...input.allObjects, ...input.windowsRes], {
     libs: input.depLibs,
-    flags: sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
-    implicitInputs: [...input.implicitInputs, exportList],
+    flags: [
+      ...sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
+      ...rustLinkFlags(cfg, input.rustObjects),
+    ],
+    implicitInputs: [...input.implicitInputs, exportList, ...input.rustObjects],
   });
 
   writeIfChanged(resolve(cfg.buildDir, "nimbus-bun-embed-shared-library.txt"), `${shared}\n`);
