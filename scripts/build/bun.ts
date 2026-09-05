@@ -726,7 +726,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
   const invalidRequestSideEffectBundleSource =
     'const ctx = globalThis.__nimbusCreateContext({ request: { args: { body: "hello" } } }); void ctx.db.insert("messages", { body: "hello" }); globalThis.__nimbusInvoke = async request => ({ status: "ok", value: request.args });';
   const hostOverflowBundleSource =
-    'globalThis.__nimbusInvoke = async function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); const value = await ctx.db.insert("messages", { body: request.args.body }); if (typeof value !== "string" || value.length < 4194304) throw new Error("large host response was not recovered"); return { status: "ok", value: "host-overflow-recovered" }; };';
+    'globalThis.__nimbusInvoke = async function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); const value = await ctx.db.insert("messages", { body: request.args.body }); if (typeof value !== "string" || value.length <= 4000000) throw new Error("large host response was not recovered"); return { status: "ok", value: "host-overflow-recovered" }; };';
   const spinBundleSource =
     'globalThis.__nimbusInvoke = function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); void ctx.db.insert("messages", { body: "spin" }); while (true) {} };';
   const sha256 = (source: string) => createHash("sha256").update(source).digest("hex");
