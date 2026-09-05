@@ -448,6 +448,7 @@ function parseArgs(argv: string[]): CliArgs {
     "unifiedSources",
     "archiveDeps",
     "timeTrace",
+    "embedderShared",
     "ci",
     "buildkite",
   ]);
@@ -466,6 +467,7 @@ function parseArgs(argv: string[]): CliArgs {
     "nodejsVersion",
     "nodejsAbiVersion",
     "webkitVersion",
+    "simdutfNamespace",
     "pgoGenerate",
     "pgoUse",
     "androidNdk",
@@ -594,6 +596,7 @@ Options:
                                   vendored dep from a local checkout),
                                   package-manager (bun|npm, installs the
                                   package.json files the build needs),
+                                  simdutfNamespace,
                                   buildDir, mode (full|cpp-only|link-only),
                                   unifiedSources, timeTrace, os, arch, abi,
                                   winsysroot (Windows cross-compile SDK root)

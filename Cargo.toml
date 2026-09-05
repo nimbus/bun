@@ -93,6 +93,8 @@ members = [
   "src/options_types",
   "src/output",
   "src/runtime",
+  "src/link_bridge",
+  "src/embed_probe",
   "src/simdutf_sys",
   "src/which",
   "src/transpiler",
@@ -200,11 +202,12 @@ overflow-checks = false
 # back to "warn" (their priority 0 beats the group's -1) where a warning level
 # is intentional.
 warnings = { level = "deny", priority = -1 }
-# `bun_asan` / `bun_debug` / `socket_fault_injection` are set via RUSTFLAGS
+# `bun_asan` / `bun_debug` / `socket_fault_injection` /
+# `bun_private_simdutf_namespace` are set via RUSTFLAGS
 # (`--cfg=...` + `--check-cfg=cfg(...)`) by scripts/build/rust.ts; register
 # them here so a plain `cargo build` / `cargo check` (without those flags)
 # doesn't warn.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bun_asan)', 'cfg(bun_debug)', 'cfg(socket_fault_injection)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bun_asan)', 'cfg(bun_debug)', 'cfg(socket_fault_injection)', 'cfg(bun_private_simdutf_namespace)'] }
 # link.exe unconditionally prints "Creating library X.dll.lib and object
 # X.dll.exp" to stdout when linking each proc-macro DLL on Windows hosts;
 # there is no linker flag to suppress it. The lint already exempts itself
@@ -460,6 +463,9 @@ bun_zstd = { path = "src/zstd" }
 bun_options_types = { path = "src/options_types" }
 bun_bunfig = { path = "src/bunfig" }
 bun_output = { path = "src/output" }
+bun_runtime = { path = "src/runtime", default-features = false }
+bun_link_bridge = { path = "src/link_bridge" }
+bun_embed_probe = { path = "src/embed_probe" }
 bun_simdutf_sys = { path = "src/simdutf_sys" }
 bun_which = { path = "src/which" }
 bun_transpiler = { path = "src/transpiler" }

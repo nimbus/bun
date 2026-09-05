@@ -25,7 +25,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Abi, Arch, Config, OS } from "./config.ts";
 import { assert } from "./error.ts";
 import { computeCpuTargetFlags } from "./flags.ts";
@@ -174,6 +174,13 @@ function windowsShimDestPath(cfg: Config): string {
   return resolve(cfg.cwd, "src", "install", "windows-shim", "bun_shim_impl.exe");
 }
 
+/** Return the rustup binary that owns Cargo, when Cargo is a rustup proxy. */
+function findRustup(cfg: Config): string | undefined {
+  if (cfg.cargo === undefined) return undefined;
+  const rustup = join(dirname(cfg.cargo), `rustup${cfg.host.exeSuffix}`);
+  return existsSync(rustup) ? rustup : undefined;
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Paths
 // ───────────────────────────────────────────────────────────────────────────
@@ -190,8 +197,12 @@ function rustTargetDir(cfg: Config): string {
  * `<target-dir>/<triple>/<profile>/<libPrefix>bun_runtime<libSuffix>`.
  */
 export function rustLibPath(cfg: Config): string {
+  return rustArchivePath(cfg, "bun_runtime");
+}
+
+export function rustArchivePath(cfg: Config, libName: string): string {
   const { subdir } = cargoProfile(cfg);
-  return resolve(rustTargetDir(cfg), rustTarget(cfg), subdir, `${cfg.libPrefix}bun_runtime${cfg.libSuffix}`);
+  return resolve(rustTargetDir(cfg), rustTarget(cfg), subdir, `${cfg.libPrefix}${libName}${cfg.libSuffix}`);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -213,7 +224,7 @@ export function registerRustRules(n: Ninja, cfg: Config): void {
   // the staticlib when nothing changed.
   n.rule("rust_build", {
     command: `${stream} --console --cwd=$cwd $env ${q(cfg.cargo)} build $args`,
-    description: "cargo bun_runtime → $label",
+    description: "cargo $package → $label",
     pool: "console",
     restat: true,
   });
@@ -254,6 +265,20 @@ export function registerRustRules(n: Ninja, cfg: Config): void {
       // exists for cargo's dep-info on $shim_dest, not for restat.
     });
   }
+  const rustup = findRustup(cfg);
+  if (rustup !== undefined && cfg.rustToolchain !== undefined) {
+    // `-q` + `--no-self-update` silence the five `info:` lines rustup prints
+    // on every no-op reinstall; warnings/errors still show.
+    const chain =
+      `${stream} --console $env ${q(rustup)} -q toolchain install ${cfg.rustToolchain} --no-self-update --component rust-src $rust_target_arg && ` +
+      `${stream} --console --cwd=$cwd $env ${q(cfg.cargo)} build $args`;
+    n.rule("rust_build_cross", {
+      command: hostWin ? `cmd /c "${chain}"` : chain,
+      description: "cargo $package → $label ($rust_target_arg)",
+      pool: "console",
+      restat: true,
+    });
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -292,6 +317,20 @@ export interface RustBuildInputs {
   vendorStamps: string[];
 }
 
+export interface RustArchiveSpec {
+  packageName: string;
+  libName: string;
+  phonyName: string;
+  includeWindowsShim?: boolean;
+}
+
+const bunRustArchiveSpec: RustArchiveSpec = {
+  packageName: "bun_runtime",
+  libName: "bun_runtime",
+  phonyName: "bun-rust",
+  includeWindowsShim: true,
+};
+
 /**
  * The exact `cargo build` invocation the Rust step uses.
  *
@@ -314,16 +353,15 @@ export interface CargoInvocation {
  * Compute the cargo command line + environment for `cargo build -p bun_runtime`.
  * Pure function of `cfg`; does no I/O.
  */
-export function cargoBuildInvocation(cfg: Config): CargoInvocation {
+export function cargoBuildInvocation(cfg: Config, spec: RustArchiveSpec = bunRustArchiveSpec): CargoInvocation {
   const targetDir = rustTargetDir(cfg);
   const triple = rustTarget(cfg);
   const tier3 = rustTargetIsTier3(triple);
   const profile = cargoProfile(cfg);
-
   // ─── Build args ───
   const args: string[] = [
     "-p",
-    "bun_runtime",
+    spec.packageName,
     "--lib",
     "--target-dir",
     targetDir,
@@ -370,7 +408,13 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
   // dylibs / build scripts), so those still build PIC. Darwin (Mach-O is
   // always PIC), Android (bionic loader requires PIE — flags.ts:934), and
   // Windows (COFF has its own model) are excluded.
-  if ((cfg.linux && cfg.abi !== "android") || cfg.freebsd) {
+  //
+  // The Nimbus embedder-shared lane is the opposite product shape: Rust feeds
+  // a shared object, so absolute ET_EXEC relocations are rejected by lld.
+  // Force PIC there even on Linux/FreeBSD.
+  if (cfg.embedderShared) {
+    rustflags.push("-Crelocation-model=pic");
+  } else if ((cfg.linux && cfg.abi !== "android") || cfg.freebsd) {
     rustflags.push("-Crelocation-model=static");
   }
   // Keep frame pointers — matches the C++ side's `-fno-omit-frame-pointer`
@@ -441,6 +485,10 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
   rustflags.push("--check-cfg=cfg(bun_debug)");
   if (cfg.debug) {
     rustflags.push("--cfg=bun_debug");
+  }
+  rustflags.push("--check-cfg=cfg(bun_private_simdutf_namespace)");
+  if (cfg.simdutfNamespace !== undefined) {
+    rustflags.push("--cfg=bun_private_simdutf_namespace");
   }
   // `bun_codegen_embed`: embed codegen-output `.js` (`include_bytes!`) instead
   // of reading them from `BUN_CODEGEN_DIR` at runtime. Mirrors Zig
@@ -688,6 +736,10 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
  * object list.
  */
 export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string[] {
+  return emitRustArchive(n, cfg, inputs, bunRustArchiveSpec);
+}
+
+export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, spec: RustArchiveSpec): string[] {
   assert(cfg.cargo !== undefined, "building bun's Rust crates requires cargo but no rust toolchain was found", {
     hint: "Install rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
   });
@@ -696,9 +748,9 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
   n.blank();
 
   const hostWin = cfg.host.os === "windows";
-  const lib = rustLibPath(cfg);
+  const lib = rustArchivePath(cfg, spec.libName);
   const tier3 = rustTargetIsTier3(rustTarget(cfg));
-  const { args, env, targetDir, triple } = cargoBuildInvocation(cfg);
+  const { args, env, targetDir, triple } = cargoBuildInvocation(cfg, spec);
 
   // ─── Windows .bin/ shim PE ───
   // Builds `src/install/windows-shim/bun_shim_impl.rs` as a freestanding release PE and wires the artifact into `include_bytes!`. Without this step `include_bytes!` embeds the
@@ -710,7 +762,7 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
   // build (toolchain forwarding, CARGO_HOME) but no codegen dep — the shim
   // crate's graph is bun_core/bun_sys/bun_string only.
   const shimInputs: string[] = [];
-  if (cfg.windows) {
+  if (cfg.windows && spec.includeWindowsShim === true) {
     const shimDest = windowsShimDestPath(cfg);
     // Always `--profile shim` (workspace `[profile.shim]`: panic=abort,
     // opt-level=z, lto, codegen-units=1, strip) regardless of bun's own
@@ -814,9 +866,10 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
   }
 
   // ─── Emit build node ───
+  const useCrossRule = findRustup(cfg) !== undefined && cfg.rustToolchain !== undefined;
   n.build({
     outputs: [lib],
-    rule: "rust_build",
+    rule: useCrossRule ? "rust_build_cross" : "rust_build",
     inputs: [],
     // Cargo binary itself + every .rs/Cargo.toml so editing one re-invokes
     // (cargo's own fingerprinting then decides what to actually recompile).
@@ -829,13 +882,15 @@ export function emitRust(n: Ninja, cfg: Config, inputs: RustBuildInputs): string
     vars: {
       cwd: cfg.cwd,
       args: quoteArgs(args, hostWin),
-      label: `${cfg.libPrefix}bun_runtime${cfg.libSuffix}`,
+      ...(useCrossRule ? { rust_target_arg: tier3 ? "" : `--target ${triple}` } : {}),
+      package: spec.packageName,
+      label: `${cfg.libPrefix}${spec.libName}${cfg.libSuffix}`,
       env: Object.entries(env)
         .map(([k, v]) => `--env=${k}=${quote(v, hostWin)}`)
         .join(" "),
     },
   });
-  n.phony("bun-rust", [lib]);
+  n.phony(spec.phonyName, [lib]);
   n.blank();
 
   return [lib];

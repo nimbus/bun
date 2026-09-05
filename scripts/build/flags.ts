@@ -664,14 +664,20 @@ export const bunOnlyFlags: Flag[] = [
     desc: "Raise constexpr limits (JSC uses heavy constexpr; under ASSERT_ENABLED, ASCIILiteral::fromLiteralUnsafe constexpr-validates the largest embedded builtin source in InternalModuleRegistryConstants.h char by char)",
   },
   {
+    flag: c => ["-DBUN_PRIVATE_SIMDUTF_NAMESPACE", `-Dsimdutf=${c.simdutfNamespace}`],
+    when: c => c.simdutfNamespace !== undefined,
+    lang: "cxx",
+    desc: "Compile Bun C++ sources against a private simdutf namespace",
+  },
+  {
     flag: ["-fno-pic", "-fno-pie"],
-    when: c => c.unix && c.abi !== "android",
+    when: c => c.unix && c.abi !== "android" && !c.embedderShared,
     desc: "No position-independent code (we're a final executable)",
   },
   {
     flag: "-fPIC",
-    when: c => c.abi === "android",
-    desc: "Android requires PIE since API 21; bionic's loader rejects non-PIE",
+    when: c => c.abi === "android" || c.embedderShared,
+    desc: "Position-independent code for Android PIE or Nimbus shared embedder",
   },
 
   // ─── Warnings-as-errors (unix) ───
@@ -1285,7 +1291,7 @@ export const linkerFlags: Flag[] = [
   },
   {
     flag: ["-fno-pic", "-Wl,-no-pie"],
-    when: c => c.linux && c.abi !== "android",
+    when: c => c.linux && c.abi !== "android" && !c.embedderShared,
     desc: "No PIE (we don't need ASLR; simpler codegen)",
   },
   {

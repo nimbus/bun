@@ -1407,6 +1407,12 @@ impl VirtualMachine {
         vm.heap_size()
     }
 
+    /// Return the JSC heap's current live size without requesting a collection.
+    #[inline]
+    pub fn heap_size(&self) -> usize {
+        self.jsc_vm().heap_size()
+    }
+
     #[inline]
     pub fn auto_garbage_collect(&self) {
         if self.aggressive_garbage_collection != GCLevel::None {

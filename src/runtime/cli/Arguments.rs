@@ -708,6 +708,11 @@ fn tag_table(cmd: CommandTag) -> &'static clap::ConvertedTable {
 #[unsafe(no_mangle)]
 static Bun__Node__ZeroFillBuffers: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Bun__Node__EnableZeroFillBuffers() {
+    Bun__Node__ZeroFillBuffers.store(true, core::sync::atomic::Ordering::Relaxed);
+}
 #[unsafe(no_mangle)]
 static Bun__Node__ProcessNoDeprecation: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);

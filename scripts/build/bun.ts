@@ -26,7 +26,8 @@
  * cpp archive is polled for and downloaded before ninja links).
  */
 
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { Sources } from "../glob-sources.ts";
 import { emitCodegen, type CodegenOutputs } from "./codegen.ts";
@@ -40,7 +41,7 @@ import { assert } from "./error.ts";
 import { bunIncludes, computeFlags, extraFlagsFor, linkDepends, linkerMapOutputs } from "./flags.ts";
 import { writeIfChanged } from "./fs.ts";
 import type { BuildNode, Ninja } from "./ninja.ts";
-import { emitRust, rustLibPath } from "./rust.ts";
+import { emitRust, emitRustArchive, rustLibPath } from "./rust.ts";
 import { quote, slash } from "./shell.ts";
 import { emitShims, machoPostlinkCommand, machoPostlinkImplicitInputs } from "./shims.ts";
 import { computeDepLibs, resolveDep, type ResolvedDep } from "./source.ts";
@@ -488,6 +489,29 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   n.comment("─── Link ───");
   n.blank();
 
+  const embedProbeVendorDeps = [lolhtml, rustArgon2].map(dep => {
+    const resolved = depsByName.get(dep.name);
+    assert(resolved !== undefined, `${dep.name} must be resolved before the embed-probe Rust archive`);
+    return resolved;
+  });
+  const embedProbeRustObjects = emitRustArchive(
+    n,
+    cfg,
+    {
+      codegenInputs: codegen.rustInputs,
+      // The main Windows Rust archive owns the one shim edge. Order the probe
+      // archive after it instead of emitting a duplicate shim output.
+      codegenOrderOnly: [...codegen.rustOrderOnly, ...(cfg.windows ? rustObjects : [])],
+      rustSources: sources.rust,
+      vendorStamps: embedProbeVendorDeps.flatMap(dep => dep.outputs),
+    },
+    {
+      packageName: "bun_embed_probe",
+      libName: "bun_embed_probe",
+      phonyName: "bun-embed-probe-rust",
+    },
+  );
+
   // Windows resources (.rc → .res): icon, VersionInfo. Compiled at link
   // time (not archived in cpp-only) — .res is small and the .rc depends
   // on cfg.version which the link step already has. Matches cmake's
@@ -504,7 +528,22 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   // is needed; if a member ever isn't, `rustLinkFlags()` in rust.ts is the
   // wrapping helper.
   const shims = emitShims(n, cfg);
-  const linkObjects = [...(archive !== undefined ? [archive] : allObjects), ...rustObjects, ...windowsRes];
+  emitEmbedProbeTarget(n, cfg, {
+    allObjects,
+    rustObjects: embedProbeRustObjects,
+    windowsRes,
+    depLibs,
+    cxxFlags: cxxFlagsFull,
+    depHeaderSignal,
+    codegenOrderOnly,
+    ldflags: [...flags.ldflags, ...systemLibs(cfg), ...shims.ldflags],
+    implicitInputs: [...linkImplicitInputs(cfg), ...shims.implicitInputs],
+  });
+  const linkObjects = [
+    ...(archive !== undefined ? [archive] : allObjects),
+    ...rustObjects,
+    ...windowsRes,
+  ];
   const ldflags = [...flags.ldflags, ...systemLibs(cfg), ...shims.ldflags];
   const exe = link(n, cfg, exeName, linkObjects, {
     libs: depLibs,
@@ -668,6 +707,381 @@ function emitLinkOnly(n: Ninja, cfg: Config): BunOutput {
     rustObjects,
     objects: [],
   };
+}
+
+interface EmbedProbeTargetInput {
+  allObjects: string[];
+  rustObjects: string[];
+  windowsRes: string[];
+  depLibs: string[];
+  cxxFlags: string[];
+  depHeaderSignal: string[];
+  codegenOrderOnly: string[];
+  ldflags: string[];
+  implicitInputs: string[];
+}
+
+function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInput): void {
+  const bundleSource =
+    'globalThis.__nimbusInvoke = async function(request) { return { status: "ok", value: { functionName: request.function_name, args: request.args, engine: "bun_jsc" } }; };';
+  const hostBundleSource =
+    'globalThis.__nimbusInvoke = async function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); const value = await ctx.db.insert("messages", { body: request.args.body }); return { status: "ok", value }; };';
+  const spinBundleSource =
+    'globalThis.__nimbusInvoke = function() { globalThis.__nimbusHostBridgeCallJson("{}"); while (true) {} };';
+  const sha256 = (source: string) => createHash("sha256").update(source).digest("hex");
+  const driver = resolve(cfg.buildDir, "embed-probe", "driver.cpp");
+  mkdirSync(dirname(driver), { recursive: true });
+  writeIfChanged(
+    driver,
+    [
+      "#include <atomic>",
+      "#include <cstddef>",
+      "",
+      'extern "C" int nimbus_bun_embed_probe_construct_and_destroy_vm();',
+      'extern "C" int nimbus_bun_embed_probe_sync_host_call();',
+      'extern "C" int nimbus_bun_embed_probe_async_host_call();',
+      'extern "C" int nimbus_bun_embed_probe_program_bundle_host_calls();',
+      'extern "C" int nimbus_bun_embed_probe_timeout_and_cancel();',
+      'extern "C" int nimbus_bun_embed_probe_permission_surface_inventory();',
+      'extern "C" int nimbus_bun_embed_probe_memory_behavior();',
+      'extern "C" int nimbus_bun_embed_probe_package_module_policy();',
+      'extern "C" int nimbus_bun_embed_probe_lifecycle_reuse_stress();',
+      "typedef bool (*NimbusBunEmbedIsCancelledFn)(void*);",
+      'extern "C" int nimbus_bun_embed_invoke_program_wrapper_json(const unsigned char*, size_t, const unsigned char*, size_t, const unsigned char*, size_t, unsigned char*, size_t, size_t*, void*, NimbusBunEmbedIsCancelledFn);',
+      "typedef int (*NimbusBunEmbedHostCallJsonFn)(void*, const unsigned char*, size_t, unsigned char*, size_t, size_t*);",
+      'extern "C" int nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(const unsigned char*, size_t, const unsigned char*, size_t, const unsigned char*, size_t, unsigned char*, size_t, size_t*, void*, NimbusBunEmbedHostCallJsonFn, void*, NimbusBunEmbedIsCancelledFn);',
+      "static int nimbus_bun_embed_driver_host_bridge(void*, const unsigned char*, size_t, unsigned char* output, size_t output_cap, size_t* output_len) {",
+      '  const unsigned char response[] = "{\\"status\\":\\"ok\\",\\"value\\":\\"driver-host-value\\"}";',
+      "  const size_t response_len = sizeof(response) - 1;",
+      "  *output_len = response_len;",
+      "  if (response_len > output_cap) return 1;",
+      "  for (size_t i = 0; i < response_len; ++i) output[i] = response[i];",
+      "  return 0;",
+      "}",
+      "struct NimbusBunEmbedCancellationProof { std::atomic<bool> guest_entered{false}; std::atomic<bool> cancelled{false}; };",
+      "static int nimbus_bun_embed_cancellation_host_bridge(void* context, const unsigned char*, size_t, unsigned char* output, size_t output_cap, size_t* output_len) {",
+      '  static const unsigned char response[] = "{\\"status\\":\\"ok\\",\\"value\\":null}";',
+      "  static_cast<NimbusBunEmbedCancellationProof*>(context)->guest_entered.store(true);",
+      "  const size_t response_len = sizeof(response) - 1;",
+      "  *output_len = response_len;",
+      "  if (response_len > output_cap) return 1;",
+      "  for (size_t i = 0; i < response_len; ++i) output[i] = response[i];",
+      "  return 0;",
+      "}",
+      "static bool nimbus_bun_embed_driver_is_cancelled(void* context) {",
+      "  auto* proof = static_cast<NimbusBunEmbedCancellationProof*>(context);",
+      "  return proof->cancelled.load() || proof->guest_entered.load();",
+      "}",
+      "static bool nimbus_bun_embed_driver_is_explicitly_cancelled(void* context) {",
+      "  return static_cast<NimbusBunEmbedCancellationProof*>(context)->cancelled.load();",
+      "}",
+      "",
+      "int main() {",
+      "  int status = nimbus_bun_embed_probe_construct_and_destroy_vm();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_sync_host_call();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_async_host_call();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_program_bundle_host_calls();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_timeout_and_cancel();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_permission_surface_inventory();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_memory_behavior();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_package_module_policy();",
+      "  if (status != 0) return status;",
+      "  status = nimbus_bun_embed_probe_lifecycle_reuse_stress();",
+      "  if (status != 0) return status;",
+      `  const unsigned char bundle[] = ${JSON.stringify(bundleSource)};`,
+      `  const unsigned char bundle_sha256[] = "${sha256(bundleSource)}";`,
+      '  const unsigned char request[] = "{\\"kind\\":\\"query\\",\\"function_name\\":\\"messages:bunProof\\",\\"args\\":{\\"body\\":\\"hello\\"}}";',
+      "  unsigned char output[512];",
+      "  size_t output_len = 0;",
+      "  NimbusBunEmbedCancellationProof normal_cancellation_proof;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, nullptr, 0, request, sizeof(request) - 1, output, sizeof(output), &output_len, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 313) return 249;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, bundle_sha256, sizeof(bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &normal_cancellation_proof, nullptr);",
+      "  if (status != 300) return 256;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, bundle_sha256, sizeof(bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 0) return status;",
+      '  const unsigned char invalid_request[] = "null); globalThis.__nimbusRequestInjection = true; //";',
+      "  output_len = 0;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, bundle_sha256, sizeof(bundle_sha256) - 1, invalid_request, sizeof(invalid_request) - 1, output, sizeof(output), &output_len, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 301) return 251;",
+      '  const unsigned char wrong_sha256[] = "0000000000000000000000000000000000000000000000000000000000000000";',
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json(bundle, sizeof(bundle) - 1, wrong_sha256, sizeof(wrong_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 313) return 252;",
+      `  const unsigned char host_bundle[] = ${JSON.stringify(hostBundleSource)};`,
+      `  const unsigned char host_bundle_sha256[] = "${sha256(hostBundleSource)}";`,
+      "  output_len = 0;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nullptr);",
+      "  if (status != 300) return 257;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 0) return status;",
+      "  if (output_len == 0) return 250;",
+      "  NimbusBunEmbedCancellationProof pre_cancelled_proof;",
+      "  pre_cancelled_proof.cancelled.store(true);",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &pre_cancelled_proof, nimbus_bun_embed_cancellation_host_bridge, &pre_cancelled_proof, nimbus_bun_embed_driver_is_cancelled);",
+      "  if (status != 314) return 254;",
+      "  if (pre_cancelled_proof.guest_entered.load()) return 255;",
+      `  const unsigned char spin_bundle[] = ${JSON.stringify(spinBundleSource)};`,
+      `  const unsigned char spin_bundle_sha256[] = "${sha256(spinBundleSource)}";`,
+      "  NimbusBunEmbedCancellationProof cancellation_proof;",
+      "  output_len = 0;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(spin_bundle, sizeof(spin_bundle) - 1, spin_bundle_sha256, sizeof(spin_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &cancellation_proof, nimbus_bun_embed_cancellation_host_bridge, &cancellation_proof, nimbus_bun_embed_driver_is_cancelled);",
+      "  return status == 314 ? 0 : 253;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const driverObject = cxx(n, cfg, driver, {
+    flags: input.cxxFlags,
+    implicitInputs: input.depHeaderSignal,
+    orderOnlyInputs: input.codegenOrderOnly,
+  });
+
+  // Bun 1.4.1 uses the same direct Rust archive inputs for the executable,
+  // the probe, and the shared embedder.
+  const rustLinkInputs = input.rustObjects;
+
+  writeIfChanged(
+    resolve(cfg.buildDir, "nimbus-bun-embed-link-args.txt"),
+    [...input.allObjects, ...rustLinkInputs, ...input.windowsRes, ...input.depLibs, ...input.ldflags].join("\n") + "\n",
+  );
+
+  const exe = link(
+    n,
+    cfg,
+    "bun-embed-probe",
+    [driverObject, ...input.allObjects, ...rustLinkInputs, ...input.windowsRes],
+    {
+      libs: input.depLibs,
+      flags: input.ldflags,
+      implicitInputs: input.implicitInputs,
+    },
+  );
+
+  emitEmbedProbeSmokeTest(n, cfg, exe);
+  if (cfg.embedderShared) {
+    emitEmbedderSharedTarget(n, cfg, { ...input, rustObjects: rustLinkInputs });
+  }
+}
+
+function emitEmbedderSharedTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInput): void {
+  assert(cfg.linux || cfg.darwin, "shared Bun embedder is currently implemented for Linux and macOS");
+  const libName = cfg.darwin ? "libnimbus_bun_jsc_embedder.dylib" : "libnimbus_bun_jsc_embedder.so";
+  const exportList = resolve(
+    cfg.buildDir,
+    cfg.darwin ? "nimbus-bun-embedder.exports" : "nimbus-bun-embedder.version-script",
+  );
+  writeIfChanged(exportList, sharedEmbedderExportList(cfg));
+
+  const shared = link(n, cfg, libName, [...input.allObjects, ...input.rustObjects, ...input.windowsRes], {
+    libs: input.depLibs,
+    flags: sharedEmbedderLinkFlags(cfg, input.ldflags, exportList, libName),
+    implicitInputs: [...input.implicitInputs, exportList],
+  });
+
+  writeIfChanged(resolve(cfg.buildDir, "nimbus-bun-embed-shared-library.txt"), `${shared}\n`);
+  const smokeStamp = emitEmbedderSharedSmokeTest(n, cfg, shared);
+  n.phony("bun-embed-shared", [shared]);
+  n.phony("check-bun-embed-shared", [smokeStamp]);
+}
+
+function emitEmbedderSharedSmokeTest(n: Ninja, cfg: Config, shared: string): string {
+  if (cfg.crossTarget !== undefined) {
+    return shared;
+  }
+
+  const loader = resolve(cfg.buildDir, "nimbus-bun-embed-shared-loader.py");
+  const stamp = resolve(cfg.buildDir, "nimbus-bun-embed-shared.smoke-test-passed");
+  writeIfChanged(
+    loader,
+    [
+      "import ctypes",
+      "import hashlib",
+      "import json",
+      "import pathlib",
+      "import sys",
+      "",
+      'print(f"loading shared adapter: {sys.argv[1]}", flush=True)',
+      "library = ctypes.CDLL(str(pathlib.Path(sys.argv[1]).resolve()))",
+      'print("shared adapter loaded", flush=True)',
+      "for name in [",
+      '    "nimbus_bun_embed_probe_construct_and_destroy_vm",',
+      '    "nimbus_bun_embed_probe_sync_host_call",',
+      '    "nimbus_bun_embed_probe_async_host_call",',
+      '    "nimbus_bun_embed_probe_program_bundle_host_calls",',
+      '    "nimbus_bun_embed_probe_timeout_and_cancel",',
+      '    "nimbus_bun_embed_probe_permission_surface_inventory",',
+      '    "nimbus_bun_embed_probe_memory_behavior",',
+      '    "nimbus_bun_embed_probe_package_module_policy",',
+      '    "nimbus_bun_embed_probe_lifecycle_reuse_stress",',
+      "]:",
+      '    print(f"running {name}", flush=True)',
+      "    probe = getattr(library, name)",
+      "    probe.argtypes = []",
+      "    probe.restype = ctypes.c_int",
+      "    status = probe()",
+      "    if status != 0:",
+      '        raise SystemExit(f"{name} returned {status}")',
+      '    print(f"passed {name}", flush=True)',
+      "",
+      "bundle = b'globalThis.__nimbusInvoke = async request => ({status: \"ok\", value: request.args});'",
+      'request = b\'{"kind":"query","function_name":"messages:sharedProof","args":{"loaded":true}}\'',
+      "expected_sha256 = hashlib.sha256(bundle).hexdigest().encode()",
+      "output = ctypes.create_string_buffer(1024)",
+      "output_len = ctypes.c_size_t()",
+      "invoke = library.nimbus_bun_embed_invoke_program_wrapper_json",
+      "byte_pointer = ctypes.POINTER(ctypes.c_ubyte)",
+      "is_cancelled_callback = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p)",
+      "never_cancelled = is_cancelled_callback(lambda _context: False)",
+      "invoke.argtypes = [",
+      "    byte_pointer, ctypes.c_size_t, byte_pointer, ctypes.c_size_t,",
+      "    byte_pointer, ctypes.c_size_t, byte_pointer, ctypes.c_size_t,",
+      "    ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, is_cancelled_callback,",
+      "]",
+      "invoke.restype = ctypes.c_int",
+      'print("running nimbus_bun_embed_invoke_program_wrapper_json", flush=True)',
+      "status = invoke(",
+      "    ctypes.cast(ctypes.c_char_p(bundle), byte_pointer), len(bundle),",
+      "    ctypes.cast(ctypes.c_char_p(expected_sha256), byte_pointer), len(expected_sha256),",
+      "    ctypes.cast(ctypes.c_char_p(request), byte_pointer), len(request),",
+      "    ctypes.cast(output, byte_pointer), len(output), ctypes.byref(output_len), ctypes.c_void_p(1), never_cancelled,",
+      ")",
+      "if status != 0:",
+      '    raise SystemExit(f"nimbus_bun_embed_invoke_program_wrapper_json returned {status}")',
+      'print("passed nimbus_bun_embed_invoke_program_wrapper_json", flush=True)',
+      "response = json.loads(output.raw[:output_len.value])",
+      'if response != {"status": "ok", "value": {"loaded": True}}:',
+      '    raise SystemExit(f"unexpected shared adapter response: {response!r}")',
+      "",
+    ].join("\n"),
+  );
+
+  const q = (path: string) => quote(path, cfg.windows);
+  n.rule("embed_shared_smoke_test", {
+    command: [
+      cfg.jsRuntime,
+      q(streamPath),
+      "check-bun-embed-shared",
+      "--console",
+      "--env=BUN_DEBUG_QUIET_LOGS=1",
+      "--stamp=$out",
+      "python3",
+      q(loader),
+      q(shared),
+    ].join(" "),
+    description: "bun-embed-shared",
+    pool: "console",
+  });
+  n.build({ outputs: [stamp], rule: "embed_shared_smoke_test", inputs: [shared, loader] });
+  return stamp;
+}
+
+function sharedEmbedderExportList(cfg: Config): string {
+  if (cfg.darwin) {
+    return [
+      "_nimbus_bun_embed_probe_construct_and_destroy_vm",
+      "_nimbus_bun_embed_probe_sync_host_call",
+      "_nimbus_bun_embed_probe_async_host_call",
+      "_nimbus_bun_embed_probe_program_bundle_host_calls",
+      "_nimbus_bun_embed_probe_timeout_and_cancel",
+      "_nimbus_bun_embed_probe_permission_surface_inventory",
+      "_nimbus_bun_embed_probe_memory_behavior",
+      "_nimbus_bun_embed_probe_package_module_policy",
+      "_nimbus_bun_embed_probe_lifecycle_reuse_stress",
+      "_nimbus_bun_embed_invoke_program_wrapper_json",
+      "_nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge",
+      "",
+    ].join("\n");
+  }
+
+  return [
+    "NIMBUS_BUN_JSC_EMBEDDER_1.0 {",
+    "  global:",
+    "    nimbus_bun_embed_probe_construct_and_destroy_vm;",
+    "    nimbus_bun_embed_probe_sync_host_call;",
+    "    nimbus_bun_embed_probe_async_host_call;",
+    "    nimbus_bun_embed_probe_program_bundle_host_calls;",
+    "    nimbus_bun_embed_probe_timeout_and_cancel;",
+    "    nimbus_bun_embed_probe_permission_surface_inventory;",
+    "    nimbus_bun_embed_probe_memory_behavior;",
+    "    nimbus_bun_embed_probe_package_module_policy;",
+    "    nimbus_bun_embed_probe_lifecycle_reuse_stress;",
+    "    nimbus_bun_embed_invoke_program_wrapper_json;",
+    "    nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge;",
+    "  local:",
+    "    *;",
+    "};",
+    "",
+  ].join("\n");
+}
+
+function sharedEmbedderLinkFlags(cfg: Config, ldflags: string[], exportList: string, libName: string): string[] {
+  const flags: string[] = [];
+  for (let i = 0; i < ldflags.length; i++) {
+    const flag = ldflags[i]!;
+    if (flag === "-fno-pic" || flag === "-Wl,-no-pie" || flag === "-pie" || flag === "-rdynamic") continue;
+    if (flag === "-Wl,-z,lazy" || flag === "-Wl,-z,norelro") continue;
+    if (cfg.darwin && flag.startsWith("-Wl,-stack_size")) continue;
+    // Drop Bun's executable export list before adding the Nimbus-only ABI list.
+    if (cfg.darwin && flag === "-exported_symbols_list") {
+      i += 1;
+      continue;
+    }
+    if (cfg.darwin && flag.startsWith("-Wl,-exported_symbols_list")) continue;
+    if (flag.startsWith("-Wl,--dynamic-list=")) continue;
+    if (flag.startsWith("-Wl,--version-script=")) continue;
+    if (flag.startsWith("-Wl,-Map=")) continue;
+    if (flag.startsWith("-Wl,-map,")) continue;
+    flags.push(flag);
+  }
+
+  if (cfg.darwin) {
+    flags.push("-dynamiclib", "-Wl,-dead_strip", `-Wl,-exported_symbols_list,${exportList}`);
+  } else {
+    flags.push("-shared", `-Wl,-soname,${libName}`, `-Wl,--version-script=${exportList}`, "-Wl,-z,relro", "-Wl,-z,now");
+  }
+
+  return flags;
+}
+
+function emitEmbedProbeSmokeTest(n: Ninja, cfg: Config, exe: string): void {
+  if (cfg.crossTarget !== undefined) {
+    n.phony("check-bun-embed-probe", [exe]);
+    return;
+  }
+
+  const stamp = resolve(cfg.buildDir, "bun-embed-probe.smoke-test-passed");
+  const q = (p: string) => quote(p, cfg.windows);
+  const wrap = [
+    cfg.jsRuntime,
+    q(streamPath),
+    "check-bun-embed-probe",
+    "--console",
+    "--env=BUN_DEBUG_QUIET_LOGS=1",
+    "--stamp=$out",
+    q(exe),
+  ].join(" ");
+
+  n.rule("embed_probe_smoke_test", {
+    command: wrap,
+    description: "bun-embed-probe",
+    pool: "console",
+  });
+
+  n.build({
+    outputs: [stamp],
+    rule: "embed_probe_smoke_test",
+    inputs: [exe],
+  });
+
+  n.phony("check-bun-embed-probe", [stamp]);
 }
 
 /**

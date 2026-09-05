@@ -537,6 +537,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bun_embed_probe"
+version = "0.0.0"
+dependencies = [
+ "bun_core",
+ "bun_event_loop",
+ "bun_jsc",
+ "bun_link_bridge",
+ "bun_runtime",
+ "bun_sha_hmac",
+]
+
+[[package]]
 name = "bun_errno"
 version = "0.0.0"
 dependencies = [
@@ -993,6 +1005,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bun_link_bridge"
+version = "0.0.0"
+dependencies = [
+ "bstr",
+ "bun_core",
+ "bun_platform",
+]
+
+[[package]]
 name = "bun_md"
 version = "0.0.0"
 dependencies = [
@@ -1289,6 +1310,7 @@ dependencies = [
  "bun_jsc",
  "bun_libarchive",
  "bun_libdeflate_sys",
+ "bun_link_bridge",
  "bun_libuv_sys",
  "bun_lsquic_sys",
  "bun_md",

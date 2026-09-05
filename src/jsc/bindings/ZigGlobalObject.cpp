@@ -267,6 +267,15 @@ static consteval unsigned getWebKitBytecodeCacheVersion()
 }
 #undef WEBKIT_BYTECODE_CACHE_HASH_KEY
 
+extern "C" unsigned getJSCBytecodeCacheVersion()
+{
+    return getWebKitBytecodeCacheVersion();
+}
+
+static constexpr uint8_t BunEmbedderModuleResolutionKindDynamicImport = 1;
+
+extern "C" bool Bun__embedderShouldDenyModuleResolution(JSC::JSGlobalObject*, const BunString*, uint8_t kind);
+
 // Declare fuzzilli function registration from FuzzilliREPRL.cpp
 #ifdef FUZZILLI_ENABLED
 extern "C" void Bun__REPRL__registerFuzzilliFunctions(Zig::GlobalObject*);
@@ -949,6 +958,223 @@ JSC::ScriptExecutionStatus Zig::GlobalObject::scriptExecutionStatus(JSC::JSGloba
 }
 
 void unsafeEvalNoop(JSGlobalObject*, const WTF::String&) {}
+
+JSC_DEFINE_HOST_FUNCTION(functionEmbedderDeniedNativeCapability,
+    (JSC::JSGlobalObject * globalObject, JSC::CallFrame*))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    throwTypeError(globalObject, scope, "Bun embedder denied native capability"_s);
+    return {};
+}
+
+static JSC::JSFunction* createEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, ASCIILiteral name)
+{
+    auto* function = JSC::JSFunction::create(
+        vm,
+        globalObject,
+        0,
+        String(name),
+        functionEmbedderDeniedNativeCapability,
+        ImplementationVisibility::Public,
+        JSC::NoIntrinsic);
+    function->putDirect(
+        vm,
+        JSC::Identifier::fromString(vm, "__nimbusDeniedNativeCapability"_s),
+        JSC::jsBoolean(true),
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    return function;
+}
+
+static void putEmbedderDeniedProperty(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object, JSC::PropertyName property, ASCIILiteral functionName)
+{
+    auto* function = createEmbedderDeniedFunction(vm, globalObject, functionName);
+    object->putDirect(
+        vm,
+        property,
+        function,
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+}
+
+static void putEmbedderDeniedFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object, ASCIILiteral name)
+{
+    putEmbedderDeniedProperty(vm, globalObject, object, JSC::Identifier::fromString(vm, name), name);
+}
+
+static void putEmbedderPermissionProfileMarker(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* object)
+{
+    object->putDirect(
+        vm,
+        JSC::Identifier::fromString(vm, "__nimbusNativePermissionProfile"_s),
+        JSC::jsString(vm, String("deny"_s)),
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+}
+
+static void putEmbedderGlobalProfileValue(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* globalThis, ASCIILiteral name, JSC::JSValue value)
+{
+    auto identifier = JSC::Identifier::fromString(vm, name);
+    auto attributes = PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0;
+    globalObject->putDirect(vm, identifier, value, attributes);
+    globalThis->putDirect(vm, identifier, value, attributes);
+}
+
+static void putEmbedderDeniedGlobalFunction(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSObject* globalThis, ASCIILiteral name)
+{
+    auto* function = createEmbedderDeniedFunction(vm, globalObject, name);
+    putEmbedderGlobalProfileValue(vm, globalObject, globalThis, name, function);
+}
+
+extern "C" void Bun__Node__EnableZeroFillBuffers();
+
+extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObject* globalObject)
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    Bun__Node__EnableZeroFillBuffers();
+    globalObject->setEvalEnabled(false, "Code generation from strings disallowed by Bun embedder profile"_s);
+
+    auto* globalThis = globalObject->globalThis();
+    auto* bunObject = uncheckedDowncast<Zig::GlobalObject>(globalObject)->bunObject();
+    if (bunObject->hasNonReifiedStaticProperties()) [[likely]] {
+        bunObject->reifyAllStaticProperties(globalObject);
+    }
+    RETURN_IF_EXCEPTION(scope, false);
+    putEmbedderPermissionProfileMarker(vm, globalObject, bunObject);
+    RETURN_IF_EXCEPTION(scope, false);
+    static constexpr ASCIILiteral deniedBunCapabilities[] = {
+        "$"_s,
+        "Archive"_s,
+        "FileSystemRouter"_s,
+        "Glob"_s,
+        "Image"_s,
+        "RedisClient"_s,
+        "S3Client"_s,
+        "SQL"_s,
+        "Terminal"_s,
+        "WebView"_s,
+        "allocUnsafe"_s,
+        "argv"_s,
+        "build"_s,
+        "connect"_s,
+        "cron"_s,
+        "cwd"_s,
+        "dns"_s,
+        "embeddedFiles"_s,
+        "enableANSIColors"_s,
+        "fetch"_s,
+        "file"_s,
+        "gc"_s,
+        "generateHeapSnapshot"_s,
+        "isStandaloneExecutable"_s,
+        "jest"_s,
+        "listen"_s,
+        "main"_s,
+        "mmap"_s,
+        "openInEditor"_s,
+        "origin"_s,
+        "plugin"_s,
+        "postgres"_s,
+        "redis"_s,
+        "registerMacro"_s,
+        "resolve"_s,
+        "resolveSync"_s,
+        "s3"_s,
+        "secrets"_s,
+        "serve"_s,
+        "shrink"_s,
+        "sleep"_s,
+        "sleepSync"_s,
+        "spawn"_s,
+        "spawnSync"_s,
+        "sql"_s,
+        "stderr"_s,
+        "stdin"_s,
+        "stdout"_s,
+        "udpSocket"_s,
+        "unsafe"_s,
+        "which"_s,
+        "write"_s,
+    };
+    for (auto name : deniedBunCapabilities) {
+        putEmbedderDeniedFunction(vm, globalObject, bunObject, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
+
+    auto* ffiObject = JSC::constructEmptyObject(globalObject);
+    RETURN_IF_EXCEPTION(scope, false);
+    putEmbedderPermissionProfileMarker(vm, globalObject, ffiObject);
+    RETURN_IF_EXCEPTION(scope, false);
+    putEmbedderDeniedFunction(vm, globalObject, ffiObject, "dlopen"_s);
+    RETURN_IF_EXCEPTION(scope, false);
+    bunObject->putDirect(
+        vm,
+        JSC::Identifier::fromString(vm, "FFI"_s),
+        ffiObject,
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
+    bunObject->putDirect(
+        vm,
+        JSC::Identifier::fromString(vm, "env"_s),
+        JSC::jsUndefined(),
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
+
+    auto* processObject = JSC::constructEmptyObject(globalObject);
+    RETURN_IF_EXCEPTION(scope, false);
+    putEmbedderPermissionProfileMarker(vm, globalObject, processObject);
+    RETURN_IF_EXCEPTION(scope, false);
+    processObject->putDirect(
+        vm,
+        JSC::Identifier::fromString(vm, "env"_s),
+        JSC::jsUndefined(),
+        PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete | 0);
+    RETURN_IF_EXCEPTION(scope, false);
+
+    putEmbedderGlobalProfileValue(vm, globalObject, globalThis, "process"_s, processObject);
+    RETURN_IF_EXCEPTION(scope, false);
+
+    auto consoleValue = globalObject->get(globalObject, JSC::Identifier::fromString(vm, "console"_s));
+    RETURN_IF_EXCEPTION(scope, false);
+    if (!consoleValue.isObject()) {
+        return false;
+    }
+    auto* consoleObject = consoleValue.getObject();
+    static constexpr ASCIILiteral deniedConsoleCapabilities[] = {
+        "_stderr"_s,
+        "_stdout"_s,
+        "write"_s,
+    };
+    for (auto name : deniedConsoleCapabilities) {
+        putEmbedderDeniedFunction(vm, globalObject, consoleObject, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
+    putEmbedderDeniedProperty(vm, globalObject, consoleObject, vm.propertyNames->asyncIteratorSymbol, "Symbol.asyncIterator"_s);
+    RETURN_IF_EXCEPTION(scope, false);
+
+    static constexpr ASCIILiteral deniedGlobalCapabilities[] = {
+        "BroadcastChannel"_s,
+        "EventSource"_s,
+        "SharedWorker"_s,
+        "WebSocket"_s,
+        "WebSocketStream"_s,
+        "Worker"_s,
+        "alert"_s,
+        "confirm"_s,
+        "fetch"_s,
+        "gc"_s,
+        "postMessage"_s,
+        "prompt"_s,
+        "reportError"_s,
+        "setImmediate"_s,
+        "setInterval"_s,
+        "setTimeout"_s,
+    };
+    for (auto name : deniedGlobalCapabilities) {
+        putEmbedderDeniedGlobalFunction(vm, globalObject, globalThis, name);
+        RETURN_IF_EXCEPTION(scope, false);
+    }
+    return true;
+}
 
 const JSC::GlobalObjectMethodTable& GlobalObject::globalObjectMethodTable()
 {
@@ -3540,6 +3766,21 @@ JSC::JSPromise* GlobalObject::moduleLoaderImportModule(JSGlobalObject* jsGlobalO
 
     VM& vm = JSC::getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    // Embedder deny gate runs before EVERY dynamic-import path out of this
+    // function — including the NodeVM early return below — so an embedder
+    // module-resolution policy cannot be bypassed via node:vm contexts.
+    {
+        auto moduleNamePolicy = moduleNameValue->value(globalObject);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+        auto moduleNamePolicyString = Bun::toStringRef(moduleNamePolicy);
+        if (Bun__embedderShouldDenyModuleResolution(globalObject, &moduleNamePolicyString, BunEmbedderModuleResolutionKindDynamicImport)) {
+            moduleNamePolicyString.deref();
+            throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+            return JSC::JSPromise::rejectedPromiseWithCaughtException(globalObject, scope);
+        }
+        moduleNamePolicyString.deref();
+    }
 
     {
         JSC::JSPromise* result = NodeVM::importModule(globalObject, moduleNameValue, parameters, sourceOrigin);
