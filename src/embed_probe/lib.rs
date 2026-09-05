@@ -234,7 +234,26 @@ impl Drop for HostBridgeInvocationGuard {
 const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
 
 const NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE: &[u8] = br#"
+(() => {
+const __nimbusRawHostBridgeCallJson = globalThis.__nimbusHostBridgeCallJson;
+if (typeof __nimbusRawHostBridgeCallJson !== "function") {
+  return 0;
+}
+if (!delete globalThis.__nimbusHostBridgeCallJson || "__nimbusHostBridgeCallJson" in globalThis) {
+  return 0;
+}
+
+const __nimbusJsonParse = JSON.parse;
+const __nimbusJsonStringify = JSON.stringify;
+const __nimbusArrayIsArray = Array.isArray;
+const __nimbusObjectKeys = Object.keys;
+const __nimbusObjectSetPrototypeOf = Object.setPrototypeOf;
+const __nimbusWeakSet = WeakSet;
+const __nimbusWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const __nimbusWeakSetDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const __nimbusWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
 const __nimbusHostOperationNames = Object.freeze({
+  __proto__: null,
   op_nimbus_http_route: "http_route",
   op_nimbus_ctx_query: "ctx_query",
   op_nimbus_ctx_paginated_query: "ctx_paginated_query",
@@ -277,7 +296,7 @@ function __nimbusFormatHostError(error) {
     return error;
   }
   try {
-    return JSON.stringify(error);
+    return __nimbusJsonStringify(error);
   } catch (_error) {
     return String(error);
   }
@@ -291,14 +310,46 @@ function __nimbusNormalizeHostOperationName(opName) {
   return operation;
 }
 
+function __nimbusCloneJsonValue(value, seen) {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (__nimbusWeakSetHas(seen, value)) {
+    throw new TypeError("Nimbus Bun/JSC host payload must not contain a cycle");
+  }
+  __nimbusWeakSetAdd(seen, value);
+
+  let clone;
+  if (__nimbusArrayIsArray(value)) {
+    clone = [];
+    __nimbusObjectSetPrototypeOf(clone, null);
+    for (let index = 0; index < value.length; index++) {
+      clone[index] = __nimbusCloneJsonValue(value[index], seen);
+    }
+  } else {
+    clone = { __proto__: null };
+    const keys = __nimbusObjectKeys(value);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
+      if (key !== "toJSON") {
+        clone[key] = __nimbusCloneJsonValue(value[key], seen);
+      }
+    }
+  }
+
+  __nimbusWeakSetDelete(seen, value);
+  return clone;
+}
+
 function __nimbusCallHostBridge(opName, payload) {
   const request = {
+    __proto__: null,
     abi_version: 1,
     operation: __nimbusNormalizeHostOperationName(opName),
-    payload: payload ?? null,
+    payload: __nimbusCloneJsonValue(payload ?? null, new __nimbusWeakSet()),
   };
-  const responseText = globalThis.__nimbusHostBridgeCallJson(JSON.stringify(request));
-  const response = JSON.parse(responseText);
+  const responseText = __nimbusRawHostBridgeCallJson(__nimbusJsonStringify(request));
+  const response = __nimbusJsonParse(responseText);
   if (!response || response.status !== "ok") {
     const error = new Error(
       `Nimbus Bun/JSC host call failed for ${opName}: ${__nimbusFormatHostError(response?.error)}`,
@@ -429,15 +480,15 @@ function __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId) {
 
 let __nimbusNextSessionId = 1;
 
-globalThis.__nimbusSyncHostValue = function(opName, payload) {
+const __nimbusSyncHostValue = function(opName, payload) {
   return __nimbusCallHostBridge(opName, payload);
 };
 
-globalThis.__nimbusAsyncHostValue = async function(opName, payload) {
+const __nimbusAsyncHostValue = async function(opName, payload) {
   return __nimbusCallHostBridge(opName, payload);
 };
 
-globalThis.__nimbusCreateContext = function(options = {}) {
+const __nimbusCreateContext = function(options = {}) {
   const hostCallSessionId =
     typeof options.hostCallSessionId === "string" && options.hostCallSessionId.length > 0
       ? options.hostCallSessionId
@@ -453,8 +504,8 @@ globalThis.__nimbusCreateContext = function(options = {}) {
     host_call_session_id: hostCallSessionId,
     ...(payload ?? {}),
   });
-  const syncHostValue = (opName, payload) => globalThis.__nimbusSyncHostValue(opName, withSession(payload));
-  const asyncHostValue = (opName, payload) => globalThis.__nimbusAsyncHostValue(opName, withSession(payload));
+  const syncHostValue = (opName, payload) => __nimbusSyncHostValue(opName, withSession(payload));
+  const asyncHostValue = (opName, payload) => __nimbusAsyncHostValue(opName, withSession(payload));
   const runFunction = (opName, kind, label, functionRef, args = {}) => {
     const normalized = __nimbusNormalizeFunctionReference(functionRef, label);
     return asyncHostValue(opName, {
@@ -539,11 +590,31 @@ globalThis.__nimbusCreateContext = function(options = {}) {
   };
 };
 
-Object.freeze(globalThis.__nimbusHostBridgeCallJson);
-Object.freeze(globalThis.__nimbusSyncHostValue);
-Object.freeze(globalThis.__nimbusAsyncHostValue);
-Object.freeze(globalThis.__nimbusCreateContext);
-1
+Object.freeze(__nimbusSyncHostValue);
+Object.freeze(__nimbusAsyncHostValue);
+Object.freeze(__nimbusCreateContext);
+Object.defineProperties(globalThis, {
+  __nimbusSyncHostValue: {
+    value: __nimbusSyncHostValue,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  },
+  __nimbusAsyncHostValue: {
+    value: __nimbusAsyncHostValue,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  },
+  __nimbusCreateContext: {
+    value: __nimbusCreateContext,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  },
+});
+return 1;
+})()
 "#;
 
 unsafe extern "C" {

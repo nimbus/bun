@@ -13,10 +13,17 @@
  */
 import { describe, expect, test } from "bun:test";
 import { isMacOS, tempDir } from "harness";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { emitPostLink } from "../../scripts/build/bun.ts";
-import { resolveConfig, type Config, type PartialConfig, type Toolchain } from "../../scripts/build/config.ts";
+import {
+  resolveConfig,
+  type BuildMode,
+  type Config,
+  type PartialConfig,
+  type Toolchain,
+} from "../../scripts/build/config.ts";
 import { Ninja } from "../../scripts/build/ninja.ts";
 
 /** A fully-populated fake toolchain; resolveConfig never spawns any of these. */
@@ -133,5 +140,51 @@ describe("emitPostLink ninja ordering", () => {
     // Cross-compile: smoke_test short-circuits to a `check` phony (the
     // binary can't run on this host), so the strip race can't happen there.
     expect(buildEdge(out, "phony")).toBe("build check: phony bun-profile");
+  });
+});
+
+describe("Nimbus embedder build contract", () => {
+  function linuxEmbedderConfig(mode: BuildMode): Config {
+    using dir = tempDir("build-embedder-config", {});
+    const buildDir = String(dir);
+    return resolveConfig(
+      {
+        os: "linux",
+        arch: "x64",
+        abi: "gnu",
+        buildType: "Release",
+        buildDir,
+        linuxSysroot: buildDir,
+        webkit: "local",
+        embedderShared: true,
+        mode,
+      },
+      mockToolchain(),
+    );
+  }
+
+  test("shared adapter is accepted only in modes that emit its target", () => {
+    expect([linuxEmbedderConfig("full").mode, linuxEmbedderConfig("archive-link").mode]).toEqual([
+      "full",
+      "archive-link",
+    ]);
+
+    for (const mode of ["cpp-only", "rust-only", "link-only", "rust-and-link"] as const) {
+      expect(() => linuxEmbedderConfig(mode)).toThrow(`--embedder-shared cannot be used with --mode=${mode}`);
+    }
+  });
+
+  test("generated POSIX smoke driver maps native statuses to portable nonzero exits", () => {
+    const source = readFileSync(resolve(import.meta.dir, "..", "..", "scripts", "build", "bun.ts"), "utf8");
+    const start = source.indexOf("function emitEmbedProbeTarget");
+    const end = source.indexOf("function emitEmbedderSharedTarget", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const driverGenerator = source.slice(start, end);
+
+    expect(driverGenerator).toContain("return status > 0 && status <= 255 ? status : 1;");
+    expect(driverGenerator).not.toContain('"  if (status != 0) return status;"');
+    expect(driverGenerator).not.toContain('"  if (status != 300) return 256;"');
+    expect(driverGenerator).not.toContain('"  if (status != 300) return 257;"');
   });
 });

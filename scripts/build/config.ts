@@ -753,6 +753,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
 
   // ─── Build type ───
   const buildType = partial.buildType ?? "Debug";
+  const mode = partial.mode ?? "full";
   const debug = buildType === "Debug";
   const release = buildType === "Release" || buildType === "RelWithDebInfo" || buildType === "MinSizeRel";
   const smol = buildType === "MinSizeRel";
@@ -1135,6 +1136,11 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
         hint: "The shared adapter needs PIC WebKit/JSC objects built from source, not the current non-PIC prebuilt archives.",
       });
     }
+    if (mode !== "full" && mode !== "archive-link") {
+      throw new BuildError(`--embedder-shared cannot be used with --mode=${mode}`, {
+        hint: "Use --mode=full or --mode=archive-link so the build graph emits the shared adapter target.",
+      });
+    }
   }
 
   const packageManager = partial.packageManager ?? "bun";
@@ -1168,7 +1174,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     // rust-only mode never compiles C/C++ or links, so it doesn't need the
     // SDK — skip resolution so a rust-only build doesn't download
     // a ~730 MB sysroot it never reads.
-    if ((partial.mode ?? "full") !== "rust-only") {
+    if (mode !== "rust-only") {
       osxSysroot = resolveMacosSdkPath(partial.macosSdk, cacheDir, cwd);
       if (toolchain.ld64Lld === undefined) {
         throw new BuildError("Cross-compiling for macOS requires ld64.lld (lld's Mach-O port)", {
@@ -1227,7 +1233,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     buildType,
     debug,
     release,
-    mode: partial.mode ?? "full",
+    mode,
     lto,
     crossLangLto,
     pgoGenerate,
