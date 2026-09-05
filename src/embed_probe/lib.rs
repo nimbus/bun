@@ -229,6 +229,16 @@ pub type NimbusBunEmbedIsCancelledFn = unsafe extern "C" fn(context: *mut c_void
 struct HostBridgeInvocation {
     context: *mut c_void,
     call_json: NimbusBunEmbedHostCallJsonFn,
+    kind: Option<HostBridgeInvocationKind>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostBridgeInvocationKind {
+    Query,
+    PaginatedQuery,
+    Mutation,
+    Action,
+    CloudflareWorkerFetch,
 }
 
 thread_local! {
@@ -244,11 +254,26 @@ impl HostBridgeInvocationGuard {
     fn install(context: *mut c_void, call_json: NimbusBunEmbedHostCallJsonFn) -> Self {
         let previous = CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
             let previous = slot.get();
-            slot.set(Some(HostBridgeInvocation { context, call_json }));
+            slot.set(Some(HostBridgeInvocation {
+                context,
+                call_json,
+                kind: None,
+            }));
             previous
         });
         Self { previous }
     }
+}
+
+fn bind_current_host_bridge_invocation_kind(kind: HostBridgeInvocationKind) -> bool {
+    CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| {
+        let Some(mut invocation) = slot.get() else {
+            return false;
+        };
+        invocation.kind = Some(kind);
+        slot.set(Some(invocation));
+        true
+    })
 }
 
 impl Drop for HostBridgeInvocationGuard {
@@ -290,7 +315,16 @@ return __nimbusObjectFreeze(__nimbusSerializeResult);
 "#;
 
 const NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE: &[u8] = br#"
-(() => {
+((__nimbusTrustedRequest) => {
+const __nimbusTrustedRequestKind =
+  __nimbusTrustedRequest !== null &&
+  typeof __nimbusTrustedRequest === "object" &&
+  typeof __nimbusTrustedRequest.kind === "string"
+    ? __nimbusTrustedRequest.kind
+    : null;
+if (__nimbusTrustedRequestKind === null) {
+  return 0;
+}
 const __nimbusRawHostBridgeCallJson = globalThis.__nimbusHostBridgeCallJson;
 if (typeof __nimbusRawHostBridgeCallJson !== "function") {
   return 0;
@@ -303,6 +337,7 @@ const __nimbusJsonParse = JSON.parse;
 const __nimbusJsonStringify = JSON.stringify;
 const __nimbusArrayIsArray = Array.isArray;
 const __nimbusObjectKeys = Object.keys;
+const __nimbusObjectFreeze = Object.freeze;
 const __nimbusObjectSetPrototypeOf = Object.setPrototypeOf;
 const __nimbusWeakSet = WeakSet;
 const __nimbusWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
@@ -366,6 +401,69 @@ function __nimbusNormalizeHostOperationName(opName) {
   return operation;
 }
 
+function __nimbusInvocationAllowsHostOperation(operation, payload) {
+  const nestedKind =
+    operation === "ctx_runtime_enter_nested_call" &&
+    payload !== null &&
+    typeof payload === "object" &&
+    typeof payload.kind === "string"
+      ? payload.kind
+      : null;
+  const common =
+    operation === "ctx_service_lookup" ||
+    operation === "ctx_resolve_callee_lane" ||
+    operation === "runtime_extension_call";
+  const read =
+    operation === "ctx_query" ||
+    operation === "ctx_paginated_query" ||
+    operation === "ctx_run_query" ||
+    operation === "document_get" ||
+    operation === "query_builder_start" ||
+    operation === "query_builder_with_index" ||
+    operation === "query_builder_filter" ||
+    operation === "query_builder_order" ||
+    operation === "query_read_collect" ||
+    operation === "query_read_take" ||
+    operation === "query_read_paginate" ||
+    operation === "query_read_first" ||
+    operation === "query_read_unique";
+  const write =
+    operation === "ctx_mutation" ||
+    operation === "ctx_run_mutation" ||
+    operation === "document_insert" ||
+    operation === "document_patch" ||
+    operation === "document_delete";
+  const schedule =
+    operation === "ctx_scheduler_run_after" ||
+    operation === "ctx_scheduler_run_at" ||
+    operation === "ctx_scheduler_cancel";
+
+  switch (__nimbusTrustedRequestKind) {
+    case "query":
+    case "paginated_query":
+      return common || read ||
+        (operation === "ctx_runtime_enter_nested_call" &&
+          (nestedKind === "query" || nestedKind === "paginated_query"));
+    case "mutation":
+      return common || read || write || schedule ||
+        (operation === "ctx_runtime_enter_nested_call" &&
+          (nestedKind === "query" || nestedKind === "paginated_query" || nestedKind === "mutation"));
+    case "action":
+      return common || operation === "http_route" || operation === "ctx_action" ||
+        operation === "ctx_run_query" || operation === "ctx_run_mutation" ||
+        operation === "ctx_run_action" || schedule ||
+        (operation === "ctx_runtime_enter_nested_call" &&
+          (nestedKind === "query" || nestedKind === "paginated_query" ||
+            nestedKind === "mutation" || nestedKind === "action"));
+    case "cloudflare_worker_fetch":
+      return operation === "http_route" || operation === "cf_kv_get" ||
+        operation === "cf_kv_put" || operation === "cf_kv_delete" ||
+        operation === "cf_kv_list" || operation === "runtime_extension_call";
+    default:
+      return false;
+  }
+}
+
 function __nimbusCloneJsonValue(value, seen) {
   if (value === null || typeof value !== "object") {
     return value;
@@ -397,12 +495,49 @@ function __nimbusCloneJsonValue(value, seen) {
   return clone;
 }
 
+const __nimbusTrustedRequestAuth =
+  __nimbusTrustedRequest.auth !== null &&
+  typeof __nimbusTrustedRequest.auth === "object"
+    ? __nimbusCloneJsonValue(__nimbusTrustedRequest.auth, new __nimbusWeakSet())
+    : null;
+const __nimbusTrustedAuthIdentity =
+  __nimbusTrustedRequestAuth !== null &&
+  __nimbusTrustedRequestAuth.identity !== null &&
+  typeof __nimbusTrustedRequestAuth.identity === "object"
+    ? __nimbusTrustedRequestAuth.identity
+    : null;
+const __nimbusTrustedVerifiedAuthIdentity =
+  __nimbusTrustedRequestAuth !== null &&
+  __nimbusTrustedRequestAuth.verified_identity !== null &&
+  typeof __nimbusTrustedRequestAuth.verified_identity === "object"
+    ? __nimbusTrustedRequestAuth.verified_identity
+    : null;
+const __nimbusThrowOnMissingIdentity =
+  __nimbusTrustedRequestAuth?.throw_on_missing_identity === true;
+
+function __nimbusCloneAuthIdentityOrThrow(identity) {
+  if (identity !== null) {
+    return __nimbusCloneJsonValue(identity, new __nimbusWeakSet());
+  }
+  if (__nimbusThrowOnMissingIdentity) {
+    throw new Error("convex httpAction requires an authenticated identity");
+  }
+  return null;
+}
+
 function __nimbusCallHostBridge(opName, payload) {
+  const operation = __nimbusNormalizeHostOperationName(opName);
+  const clonedPayload = __nimbusCloneJsonValue(payload ?? null, new __nimbusWeakSet());
+  if (!__nimbusInvocationAllowsHostOperation(operation, clonedPayload)) {
+    throw new Error(
+      `Nimbus Bun/JSC host op ${opName} is not available for ${__nimbusTrustedRequestKind} handlers`,
+    );
+  }
   const request = {
     __proto__: null,
     abi_version: 1,
-    operation: __nimbusNormalizeHostOperationName(opName),
-    payload: __nimbusCloneJsonValue(payload ?? null, new __nimbusWeakSet()),
+    operation,
+    payload: clonedPayload,
   };
   const responseText = __nimbusRawHostBridgeCallJson(__nimbusJsonStringify(request));
   const response = __nimbusJsonParse(responseText);
@@ -569,9 +704,64 @@ const __nimbusCreateContext = function(options = {}) {
       args,
     });
   };
+  const capabilities = (() => {
+    switch (__nimbusTrustedRequestKind) {
+      case "query":
+      case "paginated_query":
+        return {
+          db: true,
+          dbWrite: false,
+          scheduler: false,
+          nestedQuery: true,
+          nestedMutation: false,
+          nestedAction: false,
+        };
+      case "mutation":
+        return {
+          db: true,
+          dbWrite: true,
+          scheduler: true,
+          nestedQuery: true,
+          nestedMutation: true,
+          nestedAction: false,
+        };
+      case "action":
+        return {
+          db: false,
+          dbWrite: false,
+          scheduler: true,
+          nestedQuery: true,
+          nestedMutation: true,
+          nestedAction: true,
+        };
+      default:
+        return {
+          db: false,
+          dbWrite: false,
+          scheduler: false,
+          nestedQuery: false,
+          nestedMutation: false,
+          nestedAction: false,
+        };
+    }
+  })();
+  const unsupported = (label) => {
+    throw new Error(
+      `Nimbus Bun/JSC ctx.${label} is not available for ${__nimbusTrustedRequestKind} handlers`,
+    );
+  };
   return {
+    auth: __nimbusObjectFreeze({
+      async getUserIdentity() {
+        return __nimbusCloneAuthIdentityOrThrow(__nimbusTrustedAuthIdentity);
+      },
+      async getVerifiedIdentity() {
+        return __nimbusCloneAuthIdentityOrThrow(__nimbusTrustedVerifiedAuthIdentity);
+      },
+    }),
     db: {
       get(tableOrId, maybeId) {
+        if (!capabilities.db) unsupported("db.get");
         if (maybeId === undefined) {
           if (
             tableOrId &&
@@ -592,21 +782,26 @@ const __nimbusCreateContext = function(options = {}) {
         });
       },
       query(table) {
+        if (!capabilities.db) unsupported("db.query");
         const builderId = syncHostValue("op_nimbus_ctx_query_start", { table });
         return __nimbusCreateQueryBuilder(syncHostValue, asyncHostValue, builderId);
       },
       insert(table, fields) {
+        if (!capabilities.dbWrite) unsupported("db.insert");
         return asyncHostValue("op_nimbus_document_insert", { table, fields });
       },
       patch(table, id, patch) {
+        if (!capabilities.dbWrite) unsupported("db.patch");
         return asyncHostValue("op_nimbus_document_patch", { table, id, patch });
       },
       delete(table, id) {
+        if (!capabilities.dbWrite) unsupported("db.delete");
         return asyncHostValue("op_nimbus_document_delete", { table, id });
       },
     },
     scheduler: {
       runAfter(delayMs, functionRef, args = {}) {
+        if (!capabilities.scheduler) unsupported("scheduler.runAfter");
         const normalized = __nimbusNormalizeFunctionReference(functionRef, "scheduler.runAfter");
         return asyncHostValue("op_nimbus_ctx_scheduler_run_after", {
           delay_ms: delayMs,
@@ -615,6 +810,7 @@ const __nimbusCreateContext = function(options = {}) {
         });
       },
       runAt(timestampMs, functionRef, args = {}) {
+        if (!capabilities.scheduler) unsupported("scheduler.runAt");
         const normalized = __nimbusNormalizeFunctionReference(functionRef, "scheduler.runAt");
         return asyncHostValue("op_nimbus_ctx_scheduler_run_at", {
           timestamp_ms: timestampMs,
@@ -623,6 +819,7 @@ const __nimbusCreateContext = function(options = {}) {
         });
       },
       cancel(jobId) {
+        if (!capabilities.scheduler) unsupported("scheduler.cancel");
         return asyncHostValue("op_nimbus_ctx_scheduler_cancel", { job_id: jobId });
       },
     },
@@ -635,12 +832,15 @@ const __nimbusCreateContext = function(options = {}) {
       },
     }),
     runQuery(functionRef, args = {}) {
+      if (!capabilities.nestedQuery) unsupported("runQuery");
       return runFunction("op_nimbus_ctx_run_query", "query", "runQuery", functionRef, args);
     },
     runMutation(functionRef, args = {}) {
+      if (!capabilities.nestedMutation) unsupported("runMutation");
       return runFunction("op_nimbus_ctx_run_mutation", "mutation", "runMutation", functionRef, args);
     },
     runAction(functionRef, args = {}) {
+      if (!capabilities.nestedAction) unsupported("runAction");
       return runFunction("op_nimbus_ctx_run_action", "action", "runAction", functionRef, args);
     },
   };
@@ -670,7 +870,7 @@ Object.defineProperties(globalThis, {
   },
 });
 return 1;
-})()
+})
 "#;
 
 unsafe extern "C" {
@@ -1576,6 +1776,19 @@ fn run_program_wrapper_json_invocation_inner(
     // until the guest invocation consumes it.
     let request = request.protected();
 
+    if current_host_bridge_invocation_installed() {
+        let kind = match host_bridge_invocation_kind(global, request.value()) {
+            Ok(kind) => kind,
+            Err(()) => {
+                global.clear_exception();
+                return 301;
+            }
+        };
+        if !bind_current_host_bridge_invocation_kind(kind) {
+            return 311;
+        }
+    }
+
     // SAFETY: this fresh embedder VM is single-threaded under the JSC API lock.
     // The native helper mutates only the current global object's permission
     // profile before tenant code is evaluated.
@@ -1604,7 +1817,7 @@ fn run_program_wrapper_json_invocation_inner(
     };
 
     if current_host_bridge_invocation_installed() {
-        if let Err(status) = install_host_bridge_transport(global) {
+        if let Err(status) = install_host_bridge_transport(global, request.value()) {
             return status;
         }
     }
@@ -1684,7 +1897,29 @@ fn current_host_bridge_invocation_installed() -> bool {
     CURRENT_HOST_BRIDGE_INVOCATION.with(|slot| slot.get().is_some())
 }
 
-fn install_host_bridge_transport(global: &JSGlobalObject) -> Result<(), i32> {
+fn host_bridge_invocation_kind(
+    global: &JSGlobalObject,
+    request: JSValue,
+) -> Result<HostBridgeInvocationKind, ()> {
+    let kind = request
+        .get(global, b"kind")
+        .map_err(|_| ())?
+        .filter(|value| value.is_string())
+        .ok_or(())?
+        .to_bun_string(global)
+        .map_err(|_| ())?;
+    let kind = kind.to_utf8();
+    match kind.slice() {
+        b"query" => Ok(HostBridgeInvocationKind::Query),
+        b"paginated_query" => Ok(HostBridgeInvocationKind::PaginatedQuery),
+        b"mutation" => Ok(HostBridgeInvocationKind::Mutation),
+        b"action" => Ok(HostBridgeInvocationKind::Action),
+        b"cloudflare_worker_fetch" => Ok(HostBridgeInvocationKind::CloudflareWorkerFetch),
+        _ => Err(()),
+    }
+}
+
+fn install_host_bridge_transport(global: &JSGlobalObject, request: JSValue) -> Result<(), i32> {
     global.to_js_value().put(
         global,
         b"__nimbusHostBridgeCallJson",
@@ -1697,12 +1932,18 @@ fn install_host_bridge_transport(global: &JSGlobalObject) -> Result<(), i32> {
         ),
     );
 
-    let result = evaluate_program(
+    let installer = evaluate_program(
         global,
         NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE,
         b"nimbus-bun-linked-adapter-host-bridge-transport.js",
         309,
     )?;
+    if !installer.is_callable() {
+        return Err(310);
+    }
+    let result = installer
+        .call_with_global_this(global, &[request])
+        .map_err(|_| 309)?;
     if result.is_number() && result.as_number() as i32 == 1 {
         Ok(())
     } else {
@@ -3509,6 +3750,129 @@ impl Drop for ProbeApiLock {
     }
 }
 
+fn host_bridge_request_operation(
+    global: &JSGlobalObject,
+    request: &[u8],
+) -> Result<(Vec<u8>, Option<Vec<u8>>), ()> {
+    let envelope = EncodedSlice::utf8(request)
+        .to_json_object(global)
+        .map_err(|_| ())?;
+    if envelope.is_empty() || !envelope.is_object() || global.has_exception() {
+        return Err(());
+    }
+    let operation = host_bridge_object_string_property(global, envelope, b"operation")?;
+    let nested_kind = if operation == b"ctx_runtime_enter_nested_call" {
+        let payload = envelope
+            .get(global, b"payload")
+            .map_err(|_| ())?
+            .filter(|value| value.is_object())
+            .ok_or(())?;
+        Some(host_bridge_object_string_property(
+            global, payload, b"kind",
+        )?)
+    } else {
+        None
+    };
+    Ok((operation, nested_kind))
+}
+
+fn host_bridge_object_string_property(
+    global: &JSGlobalObject,
+    object: JSValue,
+    name: &[u8],
+) -> Result<Vec<u8>, ()> {
+    let value = object
+        .get(global, name)
+        .map_err(|_| ())?
+        .filter(|value| value.is_string())
+        .ok_or(())?;
+    let value = value.to_bun_string(global).map_err(|_| ())?;
+    Ok(value.to_utf8().slice().to_vec())
+}
+
+fn host_bridge_operation_allowed(
+    kind: HostBridgeInvocationKind,
+    operation: &[u8],
+    nested_kind: Option<&[u8]>,
+) -> bool {
+    let common = matches!(
+        operation,
+        b"ctx_service_lookup" | b"ctx_resolve_callee_lane" | b"runtime_extension_call"
+    );
+    let read = matches!(
+        operation,
+        b"ctx_query"
+            | b"ctx_paginated_query"
+            | b"ctx_run_query"
+            | b"document_get"
+            | b"query_builder_start"
+            | b"query_builder_with_index"
+            | b"query_builder_filter"
+            | b"query_builder_order"
+            | b"query_read_collect"
+            | b"query_read_take"
+            | b"query_read_paginate"
+            | b"query_read_first"
+            | b"query_read_unique"
+    );
+    let write = matches!(
+        operation,
+        b"ctx_mutation"
+            | b"ctx_run_mutation"
+            | b"document_insert"
+            | b"document_patch"
+            | b"document_delete"
+    );
+    let schedule = matches!(
+        operation,
+        b"ctx_scheduler_run_after" | b"ctx_scheduler_run_at" | b"ctx_scheduler_cancel"
+    );
+    let nested = operation == b"ctx_runtime_enter_nested_call";
+
+    match kind {
+        HostBridgeInvocationKind::Query | HostBridgeInvocationKind::PaginatedQuery => {
+            common || read || (nested && matches!(nested_kind, Some(b"query" | b"paginated_query")))
+        }
+        HostBridgeInvocationKind::Mutation => {
+            common
+                || read
+                || write
+                || schedule
+                || (nested
+                    && matches!(
+                        nested_kind,
+                        Some(b"query" | b"paginated_query" | b"mutation")
+                    ))
+        }
+        HostBridgeInvocationKind::Action => {
+            common
+                || matches!(
+                    operation,
+                    b"http_route"
+                        | b"ctx_action"
+                        | b"ctx_run_query"
+                        | b"ctx_run_mutation"
+                        | b"ctx_run_action"
+                )
+                || schedule
+                || (nested
+                    && matches!(
+                        nested_kind,
+                        Some(b"query" | b"paginated_query" | b"mutation" | b"action")
+                    ))
+        }
+        HostBridgeInvocationKind::CloudflareWorkerFetch => matches!(
+            operation,
+            b"http_route"
+                | b"cf_kv_get"
+                | b"cf_kv_put"
+                | b"cf_kv_delete"
+                | b"cf_kv_list"
+                | b"runtime_extension_call"
+        ),
+    }
+}
+
 #[bun_jsc::host_fn]
 pub fn nimbus_bun_embed_host_bridge_call_json(
     global: &JSGlobalObject,
@@ -3525,6 +3889,26 @@ pub fn nimbus_bun_embed_host_bridge_call_json(
     let request = request.to_bun_string(global)?;
     let request = request.to_utf8();
     let request = request.slice();
+    let (operation, nested_kind) = match host_bridge_request_operation(global, request) {
+        Ok(operation) => operation,
+        Err(()) => {
+            global.clear_exception();
+            return Ok(host_bridge_response_json_to_js(
+                global,
+                br#"{"status":"error","error":{"code":"invalid_host_bridge_request","message":"request must contain a valid host operation"}}"#,
+            ));
+        }
+    };
+    let kind = CURRENT_HOST_BRIDGE_INVOCATION
+        .with(|slot| slot.get().and_then(|invocation| invocation.kind));
+    if !kind
+        .is_some_and(|kind| host_bridge_operation_allowed(kind, &operation, nested_kind.as_deref()))
+    {
+        return Ok(host_bridge_response_json_to_js(
+            global,
+            br#"{"status":"error","error":{"code":"host_capability_denied","message":"host operation is not available for this invocation kind"}}"#,
+        ));
+    }
     let mut output = vec![0_u8; NIMBUS_HOST_BRIDGE_OUTPUT_CAP];
     let mut output_len = 0_usize;
 

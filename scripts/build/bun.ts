@@ -729,6 +729,8 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
     'globalThis.__nimbusInvoke = async function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); const value = await ctx.db.insert("messages", { body: request.args.body }); if (typeof value !== "string" || value.length <= 4000000) throw new Error("large host response was not recovered"); return { status: "ok", value: "host-overflow-recovered" }; };';
   const spinBundleSource =
     'globalThis.__nimbusInvoke = function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); void ctx.db.insert("messages", { body: "spin" }); while (true) {} };';
+  const authBundleSource =
+    'globalThis.__nimbusInvoke = async function(request) { const ctx = globalThis.__nimbusCreateContext({ request }); return { status: "ok", value: { user: await ctx.auth.getUserIdentity(), verified: await ctx.auth.getVerifiedIdentity() } }; };';
   const sha256 = (source: string) => createHash("sha256").update(source).digest("hex");
   const driver = resolve(cfg.buildDir, "embed-probe", "driver.cpp");
   mkdirSync(dirname(driver), { recursive: true });
@@ -738,6 +740,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "#include <atomic>",
       "#include <cstddef>",
       "#include <cstdio>",
+      "#include <cstring>",
       "",
       'extern "C" int nimbus_bun_embed_probe_construct_and_destroy_vm();',
       'extern "C" int nimbus_bun_embed_probe_sync_host_call();',
@@ -835,7 +838,8 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "  if (status != 0) return nimbus_bun_embed_driver_exit_code(status);",
       `  const unsigned char bundle[] = ${JSON.stringify(bundleSource)};`,
       `  const unsigned char bundle_sha256[] = "${sha256(bundleSource)}";`,
-      '  const unsigned char request[] = "{\\"kind\\":\\"query\\",\\"function_name\\":\\"messages:bunProof\\",\\"args\\":{\\"body\\":\\"hello\\"}}";',
+      '  const unsigned char request[] = "{\\"kind\\":\\"query\\",\\"function_name\\":\\"messages:bunProof\\",\\"args\\":{\\"body\\":\\"hello\\"},\\"auth\\":{\\"identity\\":{\\"tokenIdentifier\\":\\"issuer|user\\",\\"subject\\":\\"user\\"},\\"verified_identity\\":{\\"kind\\":\\"custom_jwt\\",\\"tokenIdentifier\\":\\"issuer|user\\"},\\"throw_on_missing_identity\\":false}}";',
+      '  const unsigned char mutation_request[] = "{\\"kind\\":\\"mutation\\",\\"function_name\\":\\"messages:bunProof\\",\\"args\\":{\\"body\\":\\"hello\\"}}";',
       "  unsigned char output[512];",
       "  size_t output_len = 0;",
       "  NimbusBunEmbedCancellationProof normal_cancellation_proof;",
@@ -866,6 +870,17 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nullptr);",
       "  if (status != 300) return 247;",
       "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 304) return 235;",
+      "  if (nimbus_bun_embed_driver_host_calls.load() != 0) return 234;",
+      `  const unsigned char auth_bundle[] = ${JSON.stringify(authBundleSource)};`,
+      `  const unsigned char auth_bundle_sha256[] = "${sha256(authBundleSource)}";`,
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(auth_bundle, sizeof(auth_bundle) - 1, auth_bundle_sha256, sizeof(auth_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  if (status != 0) return 233;",
+      '  static const unsigned char expected_auth_output[] = "{\\"status\\":\\"ok\\",\\"value\\":{\\"user\\":{\\"tokenIdentifier\\":\\"issuer|user\\",\\"subject\\":\\"user\\"},\\"verified\\":{\\"kind\\":\\"custom_jwt\\",\\"tokenIdentifier\\":\\"issuer|user\\"}}}";',
+      "  if (output_len != sizeof(expected_auth_output) - 1) return 232;",
+      "  if (memcmp(output, expected_auth_output, output_len) != 0) return 231;",
+      "  if (nimbus_bun_embed_driver_host_calls.load() != 0) return 230;",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, mutation_request, sizeof(mutation_request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
       "  if (status != 0) return nimbus_bun_embed_driver_exit_code(status);",
       '  static const unsigned char expected_host_output[] = "{\\"status\\":\\"ok\\",\\"value\\":\\"driver-host-value\\"}";',
       "  if (output_len != sizeof(expected_host_output) - 1) return 250;",
@@ -875,7 +890,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "  if (nimbus_bun_embed_driver_host_calls.load() != 1) return 244;",
       "  unsigned char tiny_output[1];",
       "  size_t pending_len = 0;",
-      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, request, sizeof(request) - 1, tiny_output, sizeof(tiny_output), &pending_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_bundle, sizeof(host_bundle) - 1, host_bundle_sha256, sizeof(host_bundle_sha256) - 1, mutation_request, sizeof(mutation_request) - 1, tiny_output, sizeof(tiny_output), &pending_len, (void*)1, nimbus_bun_embed_driver_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
       "  if (status != 307 || pending_len <= sizeof(tiny_output)) return 243;",
       "  if (nimbus_bun_embed_driver_host_calls.load() != 2) return 242;",
       "  size_t retry_len = 0;",
@@ -888,7 +903,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       "  status = nimbus_bun_embed_take_pending_response(output, sizeof(output), &output_len);",
       "  if (status != 320) return 238;",
       "  output_len = 0;",
-      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_overflow_bundle, sizeof(host_overflow_bundle) - 1, host_overflow_bundle_sha256, sizeof(host_overflow_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_overflow_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(host_overflow_bundle, sizeof(host_overflow_bundle) - 1, host_overflow_bundle_sha256, sizeof(host_overflow_bundle_sha256) - 1, mutation_request, sizeof(mutation_request) - 1, output, sizeof(output), &output_len, (void*)1, nimbus_bun_embed_driver_overflow_host_bridge, &normal_cancellation_proof, nimbus_bun_embed_driver_is_explicitly_cancelled);",
       "  if (status != 0 || output_len == 0) return 237;",
       "  if (nimbus_bun_embed_driver_overflow_host_calls.load() != 1) return 236;",
       "  NimbusBunEmbedCancellationProof pre_cancelled_proof;",
@@ -900,7 +915,7 @@ function emitEmbedProbeTarget(n: Ninja, cfg: Config, input: EmbedProbeTargetInpu
       `  const unsigned char spin_bundle_sha256[] = "${sha256(spinBundleSource)}";`,
       "  NimbusBunEmbedCancellationProof cancellation_proof;",
       "  output_len = 0;",
-      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(spin_bundle, sizeof(spin_bundle) - 1, spin_bundle_sha256, sizeof(spin_bundle_sha256) - 1, request, sizeof(request) - 1, output, sizeof(output), &output_len, &cancellation_proof, nimbus_bun_embed_cancellation_host_bridge, &cancellation_proof, nimbus_bun_embed_driver_is_cancelled);",
+      "  status = nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(spin_bundle, sizeof(spin_bundle) - 1, spin_bundle_sha256, sizeof(spin_bundle_sha256) - 1, mutation_request, sizeof(mutation_request) - 1, output, sizeof(output), &output_len, &cancellation_proof, nimbus_bun_embed_cancellation_host_bridge, &cancellation_proof, nimbus_bun_embed_driver_is_cancelled);",
       "  return status == 314 ? 0 : 253;",
       "}",
       "",
