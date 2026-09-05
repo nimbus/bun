@@ -68,6 +68,10 @@
 namespace Bun {
 using namespace WebCore;
 
+// Embedder module-resolution deny hook (defined Rust-side). Declared locally
+// per translation unit, matching ZigGlobalObject.cpp / bindings.cpp.
+extern "C" bool Bun__embedderShouldDenyModuleResolution(JSC::JSGlobalObject*, const BunString*, uint8_t kind);
+
 static JSPromise* moduleLoaderImportModuleInner(NodeVMGlobalObject* globalObject, JSC::JSModuleLoader* moduleLoader, JSC::JSString* moduleName, RefPtr<JSC::ScriptFetchParameters> parameters, const JSC::SourceOrigin& sourceOrigin);
 
 namespace NodeVM {
@@ -1663,6 +1667,23 @@ JSPromise* NodeVMGlobalObject::moduleLoaderImportModule(JSGlobalObject* globalOb
     auto* nodeVmGlobalObject = static_cast<NodeVMGlobalObject*>(globalObject);
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    // Embedder deny gate for dynamic imports originating inside a node:vm
+    // context. This is a distinct module-loader hook from
+    // GlobalObject::moduleLoaderImportModule, so it needs its own gate — a
+    // vm context with its own dynamicImportCallback resolves through
+    // NodeVM::importModule below and never reaches the main-global gate.
+    {
+        static constexpr uint8_t BunEmbedderModuleResolutionKindDynamicImport = 1;
+        auto moduleNamePolicyString = toStringRef(globalObject, moduleName);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+        if (Bun__embedderShouldDenyModuleResolution(globalObject, &moduleNamePolicyString, BunEmbedderModuleResolutionKindDynamicImport)) {
+            moduleNamePolicyString.deref();
+            throwTypeError(globalObject, scope, "Bun embedder denied module resolution"_s);
+            return JSC::JSPromise::create(vm, globalObject->promiseStructure())->rejectWithCaughtException(vm, scope);
+        }
+        moduleNamePolicyString.deref();
+    }
 
     JSPromise* result = NodeVM::importModule(nodeVmGlobalObject, moduleName, parameters, sourceOrigin);
     // importModule runs the user's dynamic-import callback, which can throw

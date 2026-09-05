@@ -167,6 +167,9 @@ export interface Config {
 
   // ─── Dependency modes ───
   webkit: WebKitMode;
+  simdutfNamespace: string | undefined;
+  /** Build the Nimbus Bun/JSC embedder as a PIC shared adapter artifact. */
+  embedderShared: boolean;
   /**
    * Deps built from a local checkout instead of the pinned tarball, keyed by
    * dep name → absolute source dir. Set via `--local-deps=name=path[,...]`.
@@ -354,6 +357,8 @@ export interface PartialConfig {
   ci?: boolean;
   buildkite?: boolean;
   webkit?: WebKitMode;
+  simdutfNamespace?: string;
+  embedderShared?: boolean;
   /**
    * `name=path[,name=path...]` — build these deps from a local checkout
    * (e.g. `mimalloc=~/code/mimalloc`). `~` expands to $HOME; relative paths
@@ -1099,6 +1104,38 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
   const nodejsAbiVersion = partial.nodejsAbiVersion ?? versionDefaults.nodejsAbiVersion;
   const nodejsV8Version = partial.nodejsV8Version ?? versionDefaults.nodejsV8Version;
   const webkitVersion = partial.webkitVersion ?? versionDefaults.webkitVersion;
+  const webkit = partial.webkit ?? "prebuilt";
+  const simdutfNamespace = partial.simdutfNamespace;
+  const embedderShared = partial.embedderShared ?? false;
+  if (simdutfNamespace !== undefined) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(simdutfNamespace)) {
+      throw new BuildError("--simdutf-namespace must be a valid C++ identifier", {
+        hint: "Use a namespace such as nimbus_bun_simdutf.",
+      });
+    }
+    if (simdutfNamespace !== "nimbus_bun_simdutf") {
+      throw new BuildError("--simdutf-namespace currently supports only nimbus_bun_simdutf", {
+        hint: "The Bun simdutf C wrapper ABI is prefixed to nimbus_bun_simdutf__* for the Nimbus linked-adapter proof.",
+      });
+    }
+    if (webkit !== "local") {
+      throw new BuildError("--simdutf-namespace requires --webkit=local", {
+        hint: "Prebuilt WebKit archives already contain public simdutf symbols; use a local WebKit source build so the namespace is applied to WebKit and Bun together.",
+      });
+    }
+  }
+  if (embedderShared) {
+    if (!linux && !darwin) {
+      throw new BuildError("--embedder-shared is currently supported only on Linux and macOS targets", {
+        hint: "Nimbus first needs the Linux/macOS in-process adapter proof before adding Windows loader semantics.",
+      });
+    }
+    if (webkit !== "local") {
+      throw new BuildError("--embedder-shared requires --webkit=local", {
+        hint: "The shared adapter needs PIC WebKit/JSC objects built from source, not the current non-PIC prebuilt archives.",
+      });
+    }
+  }
 
   const packageManager = partial.packageManager ?? "bun";
   if (packageManager !== "bun" && packageManager !== "npm") {
@@ -1212,7 +1249,9 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     timeTrace: partial.timeTrace ?? false,
     ci,
     buildkite,
-    webkit: partial.webkit ?? "prebuilt",
+    webkit,
+    simdutfNamespace,
+    embedderShared,
     localDeps: parseLocalDeps(partial.localDeps, cwd),
     packageManager,
     cwd,
@@ -1583,6 +1622,8 @@ export function formatConfig(cfg: Config, exe: string): string {
   if (!cfg.canary) features.push("canary:off");
   // Non-default modes — show so you notice when a build is unusual.
   if (cfg.webkit !== "prebuilt") features.push(`webkit:${cfg.webkit}`);
+  if (cfg.simdutfNamespace !== undefined) features.push(`simdutf:${cfg.simdutfNamespace}`);
+  if (cfg.embedderShared) features.push("embedder:shared");
   for (const name of Object.keys(cfg.localDeps)) features.push(`local:${name}`);
   if (cfg.packageManager !== "bun") features.push(`package-manager:${cfg.packageManager}`);
   if (cfg.mode !== "full") features.push(`mode:${cfg.mode}`);

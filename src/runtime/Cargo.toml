@@ -10,7 +10,7 @@ path = "lib.rs"
 # rather than an rlib consumed by a separate shim crate, means rustc never
 # encodes crate metadata for this (by far the largest) crate and cargo never
 # re-bundles every rlib into a second archive on each rebuild.
-crate-type = ["staticlib"]
+crate-type = ["rlib", "staticlib"]
 
 [lints]
 workspace = true
@@ -43,6 +43,7 @@ bun_brotli.workspace = true
 bun_lsquic_sys.workspace = true
 bun_alloc.workspace = true
 bun_platform.workspace = true
+bun_link_bridge.workspace = true
 bun_errno.workspace = true
 bun_core.workspace = true
 bun_bundler.workspace = true
@@ -116,4 +117,5 @@ bun_patch_jsc.workspace = true
 bun_css_jsc.workspace = true
 
 [features]
-default = []
+default = ["process-entry"]
+process-entry = []

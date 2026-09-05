@@ -13,7 +13,7 @@ pub use error::{Error, Result};
 /// be direct link inputs of the final binary. This crate is built as the
 /// staticlib the native build links against; the unit-test harness brings its
 /// own `main` and allocator.
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "process-entry"))]
 mod bin_entry;
 
 /// `crate::jsc` is now a thin re-export of the real `bun_jsc` crate. Draft
