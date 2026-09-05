@@ -1072,6 +1072,7 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
         "mmap"_s,
         "openInEditor"_s,
         "origin"_s,
+        "password"_s,
         "plugin"_s,
         "postgres"_s,
         "redis"_s,
