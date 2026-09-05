@@ -990,6 +990,11 @@ fn construct_vm_and_run_with_init_gate(
             // uses the smaller direct-destroy path for its fresh VM.
             {
                 let _lock = ProbeApiLock::new(vm.jsc_vm());
+                // The C ABI reports JavaScript failures as integer statuses.
+                // Consume any translated exception before this fresh VM is
+                // destroyed; termination also owns a separate request flag.
+                vm.global().clear_termination_exception();
+                vm.global().clear_exception();
                 vm.forbid_script();
             }
             vm.destroy();
