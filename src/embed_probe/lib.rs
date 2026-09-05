@@ -988,7 +988,10 @@ fn construct_vm_and_run_with_init_gate(
             // event-loop destruction can land a pending termination outside a
             // script frame. The embedder owns the same ordering even though it
             // uses the smaller direct-destroy path for its fresh VM.
-            vm.forbid_script();
+            {
+                let _lock = ProbeApiLock::new(vm.jsc_vm());
+                vm.forbid_script();
+            }
             vm.destroy();
             status
         }
