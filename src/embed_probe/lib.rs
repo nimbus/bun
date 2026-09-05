@@ -888,7 +888,7 @@ struct InvocationCancellationWatcher {
 
 impl InvocationCancellationWatcher {
     fn start(
-        jsc_vm: &VM,
+        vm: &VirtualMachine,
         context: *mut c_void,
         is_cancelled: NimbusBunEmbedIsCancelledFn,
     ) -> Result<Self, ()> {
@@ -897,7 +897,7 @@ impl InvocationCancellationWatcher {
         let completed_for_thread = Arc::clone(&completed);
         let cancelled_for_thread = Arc::clone(&cancelled);
         let context = context as usize;
-        let jsc_vm = core::ptr::from_ref(jsc_vm) as usize;
+        let vm_handle = vm.handle();
         let worker = thread::Builder::new()
             .name("nimbus-bun-cancellation".to_owned())
             .spawn(move || {
@@ -907,9 +907,10 @@ impl InvocationCancellationWatcher {
                     // watcher is joined before VM teardown.
                     if unsafe { is_cancelled(context as *mut c_void) } {
                         cancelled_for_thread.store(true, Ordering::SeqCst);
-                        // SAFETY: the invocation joins this watcher before it can
-                        // tear down the VM referenced by this stable pointer.
-                        unsafe { &*(jsc_vm as *const VM) }.notify_need_termination();
+                        // Bun's any-thread termination API closes the script
+                        // gate before it raises the JSC trap. This invocation
+                        // owns a fresh VM and discards it after cancellation.
+                        vm_handle.request_termination();
                         return;
                     }
                     thread::sleep(Duration::from_millis(1));
@@ -1406,8 +1407,7 @@ fn run_program_wrapper_json_invocation(
     // can request a trap on this VM.
     let _ = vm.jsc_vm().termination_exception();
     let cancellation =
-        match InvocationCancellationWatcher::start(vm.jsc_vm(), cancellation_context, is_cancelled)
-        {
+        match InvocationCancellationWatcher::start(vm, cancellation_context, is_cancelled) {
             Ok(cancellation) => cancellation,
             Err(()) => return 316,
         };
