@@ -40,6 +40,17 @@ static ASYNC_TASK_RETURNED: AtomicI32 = AtomicI32::new(0);
 static ASYNC_PROMISE: AtomicPtr<JSPromise> = AtomicPtr::new(core::ptr::null_mut());
 static EMBEDDER_PROCESS_INITIALIZED: Once = Once::new();
 
+fn trace_embed_probe(phase: &str) {
+    if std::env::var_os("NIMBUS_BUN_EMBED_PROBE_TRACE").is_none() {
+        return;
+    }
+
+    let current_thread = thread::current();
+    let thread_name = current_thread.name().unwrap_or("unnamed");
+    bun_core::pretty_errorln!("nimbus-embed-probe [{}]: {}", thread_name, phase);
+    bun_core::output::flush();
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SpinEntryWait {
     Entered,
@@ -1010,27 +1021,36 @@ fn construct_vm_and_run_with_init_gate(
 ) -> i32 {
     bun_core::output::init_embedder_thread();
     bun_core::StackCheck::configure_thread();
+    trace_embed_probe("thread initialized");
 
+    trace_embed_probe("waiting at initialization gate");
     if init_proof_gate.is_some_and(|gate| !gate.arrive_and_wait()) {
+        trace_embed_probe("initialization gate failed");
         return 318;
     }
+    trace_embed_probe("initialization gate released");
 
     EMBEDDER_PROCESS_INITIALIZED.call_once(|| {
+        trace_embed_probe("process initialization started");
         bun_jsc::initialize(bun_jsc::InitializeOptions::default());
 
         // Touch the high-tier runtime hooks so this staticlib root owns
         // `__BUN_RUNTIME_HOOKS` without depending on Bun's process-owned CLI
         // root.
         bun_runtime::jsc_hooks::embedder_touch_runtime_state();
+        trace_embed_probe("process initialization completed");
     });
+    trace_embed_probe("process initialization observed");
 
     let opts = InitOptions {
         is_main_thread: false,
         ..Default::default()
     };
 
+    trace_embed_probe("VM initialization started");
     match VirtualMachine::init(opts) {
         Ok(vm) => {
+            trace_embed_probe("VM initialization completed");
             // SAFETY: `VirtualMachine::init` returned a fresh VM pointer for
             // this probe invocation. The closure runs before teardown and does
             // not store the mutable reference beyond this stack frame.
@@ -1049,10 +1069,15 @@ fn construct_vm_and_run_with_init_gate(
                 vm.global().clear_exception();
                 vm.forbid_script();
             }
+            trace_embed_probe("VM destruction started");
             vm.destroy();
+            trace_embed_probe("VM destruction completed");
             status
         }
-        Err(_) => 1,
+        Err(_) => {
+            trace_embed_probe("VM initialization returned an error");
+            1
+        }
     }
 }
 
