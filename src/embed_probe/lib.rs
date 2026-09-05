@@ -48,9 +48,17 @@ fn trace_embed_probe(phase: &'static [u8]) {
     // Use one direct write so diagnostics do not take Bun's shared output
     // locks and accidentally serialize the concurrent first-VM proof.
     // A failed write is diagnostic loss only; it must not alter the probe.
+    #[cfg(unix)]
     unsafe {
-        let _ = libc::write(libc::STDERR_FILENO, phase.as_ptr().cast(), phase.len());
+        let _ = libc::write(2, phase.as_ptr().cast(), phase.len());
     }
+    #[cfg(windows)]
+    unsafe {
+        let count = phase.len().min(libc::c_uint::MAX as usize) as libc::c_uint;
+        let _ = libc::write(2, phase.as_ptr().cast(), count);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = phase;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,7 +221,8 @@ pub type NimbusBunEmbedHostCallJsonFn = unsafe extern "C" fn(
 ) -> i32;
 // ABI 3 calls the host once with a non-null request. If that call returns 307,
 // the host retains the completed response and a null, zero-length request takes
-// it without repeating the operation.
+// it without repeating the operation. Status 321 rejects a response above the
+// 32 MiB cross-ABI ceiling before a second allocation.
 pub type NimbusBunEmbedIsCancelledFn = unsafe extern "C" fn(context: *mut c_void) -> bool;
 
 #[derive(Clone, Copy)]
@@ -1603,6 +1612,9 @@ fn run_program_wrapper_json_invocation_inner(
     unsafe {
         *output_len = response.len();
     }
+    if response.len() > NIMBUS_EMBED_RESPONSE_MAX_BYTES {
+        return 321;
+    }
     if response.len() > output_cap {
         PENDING_INVOCATION_RESPONSE.with(|slot| {
             slot.replace(Some(response.to_vec()));
@@ -1952,6 +1964,20 @@ typeof globalThis.process === "undefined"
     denied_global_surface!("setImmediate"),
     denied_global_surface!("setInterval"),
     denied_global_surface!("setTimeout"),
+    PermissionSurfaceProbe {
+        name: "Atomics.wait and WebAssembly atomic wait",
+        source: br#"
+(() => {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 0);
+    return 5;
+  } catch (error) {
+    return String(error && error.message || error)
+      .includes("Atomics.wait cannot be called from the current thread") ? 2 : 4;
+  }
+})()
+"#,
+    },
     PermissionSurfaceProbe {
         name: "new Function",
         source: br#"globalThis.__nimbusPermissionProbeDynamicCode(() => new Function("return 1"))"#,
@@ -3479,6 +3505,12 @@ pub fn nimbus_bun_embed_host_bridge_call_json(
             ));
         }
         let required_len = output_len;
+        if required_len > NIMBUS_EMBED_RESPONSE_MAX_BYTES {
+            return Ok(host_bridge_response_json_to_js(
+                global,
+                br#"{"status":"error","error":{"code":"host_bridge_response_too_large","message":"host bridge response exceeded the 32 MiB ABI limit"}}"#,
+            ));
+        }
         let mut completed = Vec::new();
         if completed.try_reserve_exact(required_len).is_err() {
             return Ok(host_bridge_response_json_to_js(
@@ -3535,6 +3567,7 @@ pub fn nimbus_bun_embed_host_bridge_call_json(
 }
 
 const NIMBUS_HOST_BRIDGE_OUTPUT_CAP: usize = 4 * 1024 * 1024;
+const NIMBUS_EMBED_RESPONSE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 fn host_bridge_response_json_to_js(global: &JSGlobalObject, response: &[u8]) -> JSValue {
     EncodedSlice::utf8(response).to_js(global)

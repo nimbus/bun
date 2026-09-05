@@ -38,6 +38,10 @@ public:
     JSC::JSArrayBuffer* toJS(JSC::JSGlobalObject*, JSC::JSGlobalObject*, JSC::ArrayBuffer&) override;
     void registerWrapper(JSC::JSGlobalObject*, ArrayBuffer&, JSC::JSArrayBuffer&) override;
     bool isAtomicsWaitAllowedOnCurrentThread() override;
+    void setAtomicsWaitAllowed(bool allowAtomicsWait)
+    {
+        m_allowAtomicsWait = allowAtomicsWait;
+    }
 
     JSC::WeakHandleOwner* wrapperOwner() { return &m_owner; }
 

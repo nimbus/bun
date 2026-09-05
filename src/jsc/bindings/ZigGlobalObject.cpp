@@ -70,6 +70,7 @@
 #include "BunPlugin.h"
 #include "BunProcess.h"
 #include "BunSecureContextCache.h"
+#include "WebCoreTypedArrayController.h"
 #include "NodeV8.h"
 #include "ProcessIdentifier.h"
 #include "GlobalEventScope.h"
@@ -1032,6 +1033,12 @@ extern "C" bool Bun__embedderApplyNativePermissionDenyProfile(JSC::JSGlobalObjec
     auto scope = DECLARE_THROW_SCOPE(vm);
     Bun__Node__EnableZeroFillBuffers();
     globalObject->setEvalEnabled(false, "Code generation from strings disallowed by Bun embedder profile"_s);
+
+    // A termination trap cannot interrupt a thread parked in Atomics.wait or
+    // a WebAssembly atomic wait. The typed-array controller owns the common
+    // JSC gate for both operations, so the tenant deny profile must close it.
+    static_cast<WebCore::WebCoreTypedArrayController*>(vm.m_typedArrayController.get())
+        ->setAtomicsWaitAllowed(false);
 
     auto* globalThis = globalObject->globalThis();
     auto* bunObject = uncheckedDowncast<Zig::GlobalObject>(globalObject)->bunObject();
