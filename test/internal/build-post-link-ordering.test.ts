@@ -188,6 +188,21 @@ describe("Nimbus embedder build contract", () => {
     expect(driverGenerator).not.toContain('"  if (status != 300) return 257;"');
   });
 
+  test("native probe covers pre-execution request validation and completed-response retrieval", () => {
+    const source = readFileSync(resolve(import.meta.dir, "..", "..", "scripts", "build", "bun.ts"), "utf8");
+    const start = source.indexOf("function emitEmbedProbeTarget");
+    const end = source.indexOf("function emitEmbedderSharedTarget", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const driverGenerator = source.slice(start, end);
+
+    expect(driverGenerator).toContain("invalid_request_side_effect_bundle");
+    expect(driverGenerator).toContain("nimbus_bun_embed_driver_host_calls.load() != 0");
+    expect(driverGenerator).toContain("nimbus_bun_embed_take_pending_response");
+    expect(driverGenerator).toContain("status != 307 || retry_len != pending_len");
+    expect(driverGenerator).toContain("nimbus_bun_embed_driver_host_calls.load() != 2");
+  });
+
   test("probe archive tracks its embedded JavaScript bundle", () => {
     const source = readFileSync(resolve(import.meta.dir, "..", "..", "scripts", "build", "bun.ts"), "utf8");
     const start = source.indexOf('packageName: "bun_embed_probe"');

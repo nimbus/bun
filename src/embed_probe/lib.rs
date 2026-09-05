@@ -208,6 +208,7 @@ struct HostBridgeInvocation {
 
 thread_local! {
     static CURRENT_HOST_BRIDGE_INVOCATION: Cell<Option<HostBridgeInvocation>> = const { Cell::new(None) };
+    static PENDING_INVOCATION_RESPONSE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
 }
 
 struct HostBridgeInvocationGuard {
@@ -739,6 +740,7 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json(
     cancellation_context: *mut c_void,
     is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
+    clear_pending_invocation_response();
     if bundle_ptr.is_null() || request_ptr.is_null() || output_ptr.is_null() || output_len.is_null()
     {
         return 300;
@@ -794,6 +796,7 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
     cancellation_context: *mut c_void,
     is_cancelled: Option<NimbusBunEmbedIsCancelledFn>,
 ) -> i32 {
+    clear_pending_invocation_response();
     if bundle_ptr.is_null()
         || request_ptr.is_null()
         || output_ptr.is_null()
@@ -839,6 +842,51 @@ pub extern "C" fn nimbus_bun_embed_invoke_program_wrapper_json_with_host_bridge(
             is_cancelled,
         )
     })
+}
+
+/// Copies the completed response retained by the most recent invocation on
+/// this thread. Status 307 leaves the response available for a larger retry;
+/// status 320 means no completed response is pending. A new invocation on the
+/// same thread invalidates any response that was not taken.
+#[unsafe(no_mangle)]
+pub extern "C" fn nimbus_bun_embed_take_pending_response(
+    output_ptr: *mut u8,
+    output_cap: usize,
+    output_len: *mut usize,
+) -> i32 {
+    if output_ptr.is_null() || output_len.is_null() {
+        return 300;
+    }
+
+    PENDING_INVOCATION_RESPONSE.with(|slot| {
+        let mut pending = slot.borrow_mut();
+        let Some(response) = pending.as_ref() else {
+            return 320;
+        };
+
+        // SAFETY: `output_len` was validated non-null and is owned by the
+        // caller for this synchronous ABI call.
+        unsafe {
+            *output_len = response.len();
+        }
+        if response.len() > output_cap {
+            return 307;
+        }
+
+        // SAFETY: `output_ptr` was validated non-null and the capacity check
+        // bounds this copy into the caller-provided output buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(response.as_ptr(), output_ptr, response.len());
+        }
+        pending.take();
+        0
+    })
+}
+
+fn clear_pending_invocation_response() {
+    PENDING_INVOCATION_RESPONSE.with(|slot| {
+        slot.borrow_mut().take();
+    });
 }
 
 fn verify_bundle_sha256(
@@ -1448,6 +1496,17 @@ fn run_program_wrapper_json_invocation_inner(
     let _resolution_deny_guard = EmbedderResolutionDenyGuard::new();
     let _lock = ProbeApiLock::new(vm.jsc_vm());
 
+    let request = match EncodedSlice::utf8(request_json).to_json_object(global) {
+        Ok(request) => request,
+        Err(_) => return 301,
+    };
+    if request.is_empty() || !request.is_object() || global.has_exception() {
+        return 301;
+    }
+    // Bundle evaluation can allocate and collect. Keep the parsed request live
+    // until the guest invocation consumes it.
+    let request = request.protected();
+
     // SAFETY: this fresh embedder VM is single-threaded under the JSC API lock.
     // The native helper mutates only the current global object's permission
     // profile before tenant code is evaluated.
@@ -1477,18 +1536,11 @@ fn run_program_wrapper_json_invocation_inner(
         return status;
     }
 
-    let request = match EncodedSlice::utf8(request_json).to_json_object(global) {
-        Ok(request) => request,
-        Err(_) => return 301,
-    };
-    if request.is_empty() || global.has_exception() {
-        return 301;
-    }
     let invoke = match global.to_js_value().get(global, b"__nimbusInvoke") {
         Ok(Some(invoke)) if invoke.is_callable() => invoke,
         _ => return 303,
     };
-    let result = match invoke.call_with_global_this(global, &[request]) {
+    let result = match invoke.call_with_global_this(global, &[request.value()]) {
         Ok(result) => result,
         Err(_) => return 303,
     };
@@ -1522,6 +1574,9 @@ fn run_program_wrapper_json_invocation_inner(
         *output_len = response.len();
     }
     if response.len() > output_cap {
+        PENDING_INVOCATION_RESPONSE.with(|slot| {
+            slot.replace(Some(response.to_vec()));
+        });
         return 307;
     }
 
