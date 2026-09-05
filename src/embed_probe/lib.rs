@@ -259,6 +259,36 @@ impl Drop for HostBridgeInvocationGuard {
 
 const GENERATED_NIMBUS_PROGRAM_BUNDLE: &[u8] = include_bytes!("nimbus_generated_program_bundle.js");
 
+const NIMBUS_RESULT_SERIALIZER_SOURCE: &[u8] = br#"
+(() => {
+const __nimbusJsonStringify = JSON.stringify;
+const __nimbusObjectCreate = Object.create;
+const __nimbusObjectFreeze = Object.freeze;
+const __nimbusObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+
+const __nimbusSerializeResult = function(result) {
+  if (result === null || typeof result !== "object") {
+    throw new TypeError("Nimbus Bun/JSC result must be an object");
+  }
+  const statusDescriptor = __nimbusObjectGetOwnPropertyDescriptor(result, "status");
+  if (!statusDescriptor || (statusDescriptor.value !== "ok" && statusDescriptor.value !== "error")) {
+    throw new TypeError("Nimbus Bun/JSC result must have an own ok or error status");
+  }
+
+  const envelope = __nimbusObjectCreate(null);
+  envelope.status = statusDescriptor.value;
+  const payloadName = statusDescriptor.value === "ok" ? "value" : "error";
+  const payloadDescriptor = __nimbusObjectGetOwnPropertyDescriptor(result, payloadName);
+  if (payloadDescriptor) {
+    envelope[payloadName] = payloadDescriptor.value;
+  }
+  return __nimbusJsonStringify(envelope);
+};
+
+return __nimbusObjectFreeze(__nimbusSerializeResult);
+})()
+"#;
+
 const NIMBUS_HOST_BRIDGE_TRANSPORT_SOURCE: &[u8] = br#"
 (() => {
 const __nimbusRawHostBridgeCallJson = globalThis.__nimbusHostBridgeCallJson;
@@ -1560,6 +1590,19 @@ fn run_program_wrapper_json_invocation_inner(
         return 315;
     }
 
+    // Capture the result encoder before tenant code can replace JSON
+    // primordials or install an inherited toJSON hook. The returned function
+    // remains protected off-graph and rebuilds only the trusted ABI envelope.
+    let result_serializer = match evaluate_program(
+        global,
+        NIMBUS_RESULT_SERIALIZER_SOURCE,
+        b"nimbus-bun-linked-adapter-result-serializer.js",
+        305,
+    ) {
+        Ok(serializer) if serializer.is_callable() => serializer.protected(),
+        _ => return 305,
+    };
+
     if current_host_bridge_invocation_installed() {
         if let Err(status) = install_host_bridge_transport(global) {
             return status;
@@ -1598,9 +1641,16 @@ fn run_program_wrapper_json_invocation_inner(
         None => result,
     };
 
-    let json_output = match result.json_stringify_fast(global) {
-        Ok(output) => output,
+    let json_output = match result_serializer
+        .value()
+        .call_with_global_this(global, &[result])
+    {
+        Ok(output) if output.is_string() => match output.to_bun_string(global) {
+            Ok(output) => output,
+            Err(_) => return 305,
+        },
         Err(_) => return 305,
+        _ => return 305,
     };
     if json_output.tag() == bun_core::Tag::Dead {
         return 306;
