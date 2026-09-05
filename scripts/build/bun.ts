@@ -503,6 +503,7 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
       // archive after it instead of emitting a duplicate shim output.
       codegenOrderOnly: [...codegen.rustOrderOnly, ...(cfg.windows ? rustObjects : [])],
       rustSources: sources.rust,
+      embeddedSources: [resolve(cfg.cwd, "src/embed_probe/nimbus_generated_program_bundle.js")],
       vendorStamps: embedProbeVendorDeps.flatMap(dep => dep.outputs),
     },
     {

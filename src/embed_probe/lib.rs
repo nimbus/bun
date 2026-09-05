@@ -982,11 +982,14 @@ fn construct_vm_and_run_with_init_gate(
             // SAFETY: `VirtualMachine::init` returned a fresh VM pointer for
             // this probe invocation. The closure runs before teardown and does
             // not store the mutable reference beyond this stack frame.
-            let status = run(unsafe { &mut *vm });
-            // SAFETY: `VirtualMachine::init` returned a fresh VM pointer owned
-            // by this probe. No other Rust reference exists, and this path
-            // immediately tears it down before returning to the C driver.
-            unsafe { (&mut *vm).destroy() };
+            let vm = unsafe { &mut *vm };
+            let status = run(vm);
+            // Bun's teardown contract closes the native-to-script gate before
+            // event-loop destruction can land a pending termination outside a
+            // script frame. The embedder owns the same ordering even though it
+            // uses the smaller direct-destroy path for its fresh VM.
+            vm.forbid_script();
+            vm.destroy();
             status
         }
         Err(_) => 1,

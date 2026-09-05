@@ -187,4 +187,15 @@ describe("Nimbus embedder build contract", () => {
     expect(driverGenerator).not.toContain('"  if (status != 300) return 256;"');
     expect(driverGenerator).not.toContain('"  if (status != 300) return 257;"');
   });
+
+  test("probe archive tracks its embedded JavaScript bundle", () => {
+    const source = readFileSync(resolve(import.meta.dir, "..", "..", "scripts", "build", "bun.ts"), "utf8");
+    const start = source.indexOf('packageName: "bun_embed_probe"');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const archiveInputs = source.slice(Math.max(0, start - 700), start);
+
+    expect(archiveInputs).toContain(
+      'embeddedSources: [resolve(cfg.cwd, "src/embed_probe/nimbus_generated_program_bundle.js")]',
+    );
+  });
 });

@@ -310,6 +310,11 @@ export interface RustBuildInputs {
    */
   rustSources: string[];
   /**
+   * Non-Rust source files compiled into the archive through `include_bytes!`
+   * or `include_str!`. Content changes must re-invoke cargo.
+   */
+  embeddedSources?: string[];
+  /**
    * Fetch stamps for vendored Rust crates the workspace consumes as path
    * dependencies (currently lol-html). Implicit inputs so cargo never runs
    * before the source tree exists, and so a commit bump re-invokes cargo.
@@ -877,7 +882,14 @@ export function emitRustArchive(n: Ninja, cfg: Config, inputs: RustBuildInputs, 
     // so depending on those orders the codegen step before cargo without
     // ninja needing to know the `.rs` paths. vendorStamps orders the
     // lol-html source fetch before cargo resolves the path dep.
-    implicitInputs: [cfg.cargo, ...inputs.rustSources, ...inputs.codegenInputs, ...inputs.vendorStamps, ...shimInputs],
+    implicitInputs: [
+      cfg.cargo,
+      ...inputs.rustSources,
+      ...(inputs.embeddedSources ?? []),
+      ...inputs.codegenInputs,
+      ...inputs.vendorStamps,
+      ...shimInputs,
+    ],
     orderOnlyInputs: inputs.codegenOrderOnly,
     vars: {
       cwd: cfg.cwd,
